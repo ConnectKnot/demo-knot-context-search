@@ -3,6 +3,7 @@ import path from "node:path";
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
+  output: "export",
   outputFileTracingRoot: path.resolve(__dirname),
 };
 

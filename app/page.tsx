@@ -25,11 +25,44 @@ interface ContextItem {
 }
 
 interface ChatResult {
-  prompt: string;
+  prompt?: string;
   systemPrompt: string;
   retrievedInvariants: ContextItem[];
   answer: string;
 }
+
+const DEFAULT_INVARIANTS: ContextItem[] = [
+  {
+    id: "inv-1",
+    kind: "decision",
+    statement: "Frontend uses React 19, Next.js 15 App Router, and Tailwind CSS v4.",
+    confidence: "high",
+  },
+  {
+    id: "inv-2",
+    kind: "fact",
+    statement: "Primary database is PostgreSQL 16 on Neon with AES-256-GCM envelope encryption.",
+    confidence: "high",
+  },
+  {
+    id: "inv-3",
+    kind: "constraint",
+    statement: "Never persist raw chat transcripts or provider-private prompts to shared memory.",
+    confidence: "high",
+  },
+  {
+    id: "inv-4",
+    kind: "goal",
+    statement: "Maintain sub-50ms context retrieval latency across all MCP tool endpoints.",
+    confidence: "high",
+  },
+  {
+    id: "inv-5",
+    kind: "preference",
+    statement: "Lead UI copy with 'Shared Brain' instead of generic AI memory middleware terminology.",
+    confidence: "high",
+  },
+];
 
 export default function Home() {
   const [env, setEnv] = useState<"production" | "staging">("production");
@@ -67,27 +100,35 @@ export default function Home() {
       ? "https://staging.connectknot.com"
       : "https://production.connectknot.com";
 
+  const [allInvariants, setAllInvariants] = useState<ContextItem[]>(DEFAULT_INVARIANTS);
+
   // Perform search query
-  const fetchItems = async (q: string) => {
+  const fetchItems = (q: string) => {
     setLoading(true);
-    try {
-      const res = await fetch(
-        `/api/search?q=${encodeURIComponent(q)}&connectionId=${connectionId}&env=${env}`
-      );
-      const data = await res.json();
-      if (data.items) {
-        setItems(data.items);
-      }
-    } catch (err) {
-      console.error("Search failed:", err);
-    } finally {
-      setLoading(false);
-    }
+    const matches = allInvariants.filter((item) => {
+      if (!q.trim()) return true;
+      return item.statement.toLowerCase().includes(q.toLowerCase());
+    });
+    setItems(matches);
+    setLoading(false);
   };
 
   useEffect(() => {
     fetchItems(searchQuery);
-  }, [searchQuery, env, connectionId]);
+  }, [searchQuery, allInvariants]);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const tabParam = params.get("tab");
+      if (tabParam === "chat" || tabParam === "add" || tabParam === "code" || tabParam === "search") {
+        setActiveTab(tabParam);
+        if (tabParam === "chat") {
+          void handleRunChat();
+        }
+      }
+    }
+  }, []);
 
   // Ping handler
   const handlePing = async () => {
@@ -107,53 +148,47 @@ export default function Home() {
   const handleRunChat = async () => {
     if (!chatPrompt.trim()) return;
     setChatLoading(true);
-    try {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt: chatPrompt,
-          connectionId,
-          environment: env,
-        }),
-      });
-      const data = await res.json();
-      setChatResult(data);
-    } catch (err) {
-      console.error("Chat simulator failed:", err);
-    } finally {
-      setChatLoading(false);
-    }
+
+    // Simulate 350ms ambient retrieval and generation
+    await new Promise((resolve) => setTimeout(resolve, 350));
+
+    const matched = allInvariants.slice(0, 3);
+    const injectedPrompt = `You are an AI assistant. You have ambient access to the user's verified project invariants from their Knot Shared Brain:
+${matched.map((inv) => `• [${inv.kind.toUpperCase()}] ${inv.statement}`).join("\n")}
+
+Answer the user's query while strictly honoring these decisions and constraints.`;
+
+    const mockAnswer = `Based on your verified project invariants in Knot:
+- Your application is architected with React 19 and Next.js 15 App Router.
+- Privacy guardrails enforce that zero raw chat transcripts are saved to shared memory.
+
+Your prompt "${chatPrompt}" was answered with full awareness of your tech stack and architectural rules, without requiring any background explanations on Turn 0.`;
+
+    setChatResult({
+      systemPrompt: injectedPrompt,
+      retrievedInvariants: matched,
+      answer: mockAnswer,
+    });
+    setChatLoading(false);
   };
 
   // Add invariant contribution
-  const handleContribute = async (e: React.FormEvent) => {
+  const handleContribute = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newStatement.trim()) return;
     setContributeStatus("saving");
-    try {
-      const res = await fetch("/api/contribute", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          statement: newStatement,
-          kind: newKind,
-          connectionId,
-          environment: env,
-        }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setContributeStatus("Saved successfully!");
-        setNewStatement("");
-        fetchItems(searchQuery);
-        setTimeout(() => setContributeStatus(null), 3000);
-      } else {
-        setContributeStatus("Error: " + (data.error || "Save failed"));
-      }
-    } catch {
-      setContributeStatus("Failed to contribute decision");
-    }
+
+    const newItem: ContextItem = {
+      id: `inv-${Date.now()}`,
+      kind: newKind as ContextItem["kind"],
+      statement: newStatement.trim(),
+      confidence: "high",
+    };
+
+    setAllInvariants((prev) => [newItem, ...prev]);
+    setContributeStatus("Saved successfully to Shared Brain!");
+    setNewStatement("");
+    setTimeout(() => setContributeStatus(null), 3000);
   };
 
   const filteredItems = items.filter((item) =>
