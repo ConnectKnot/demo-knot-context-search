@@ -41,10 +41,10 @@ Copy and paste the exact server-side snippet into your own application backend.
 Just like **Plaid** connects bank accounts without sharing credentials, **Knot** connects your users' **Shared Brain** to your application on **Turn 0** without asking users to copy-paste background notes.
 
 This demo demonstrates the complete developer integration lifecycle:
-1. **Frontend Consent Sheet (`<ContinueWithKnot />`)**: 3-line drop-in React button for OAuth 2.1 S256 PKCE authorization.
-2. **Context Search & Invariant Explorer**: Hybrid lexical and encrypted semantic search across approved user invariants.
-3. **Turn-0 AI Prompt Simulator**: Automatically queries Knot for relevant invariants and prepends them into an LLM's system prompt before generating completions.
-4. **Decision Writeback**: Submits new architectural decisions and rules back to Knot so other connected AI tools (Cursor, Claude, ChatGPT) immediately know about them.
+1. **Real OAuth 2.1 S256 PKCE Login (`Continue with Knot`)**: Performs Dynamic Client Registration (`/api/oauth/register`), redirects the user to Knot's consent page (`/authorize`) to log into their real Knot account and choose which **projects**, **permissions** (`context:read`, `context:contribute:project`, `context:propose`), and **personal memories** to share, and exchanges the authorization code for a live Bearer token (`/api/oauth/token`).
+2. **Live Context Search & Project Filtering**: Queries the user's shared projects and personal memories via `/api/mcp` (`get_relevant_context`, `list_context`, `search_context`, `get_active_state`) with dynamic project filter pills.
+3. **Turn-0 AI Prompt Simulator**: Queries the user's live Knot context for the prompt and injects their real verified invariants into the LLM system prompt before generating a grounded completion.
+4. **Live Decision Writeback**: Commits new architectural decisions and facts directly back to the user's Knot account (`propose_context`) so other connected AI tools (Cursor, Claude, ChatGPT) immediately stay in sync.
 5. **Dual Environment Support**: Seamless switching between **Production** (`production.connectknot.com`) and **Staging** (`staging.connectknot.com`) with container cold-start wake-up diagnostics.
 
 ---
@@ -64,14 +64,17 @@ npm install
 
 ### 3. Provision Credentials (Choose One)
 
-#### Option A: One-Shot Terminal Command via Knot CLI
+#### Option A: Zero-Config Dynamic OAuth 2.1 (Works Out of the Box)
+Click **Continue with Knot** directly in the UI. The app automatically registers an OAuth 2.1 PKCE client against `production.connectknot.com` (or `staging.connectknot.com`) and redirects you to your Knot account to pick which projects and permissions to share.
+
+#### Option B: One-Shot Terminal Command via Knot CLI
 If you have [`@knot-ai/cli`](https://www.npmjs.com/package/@knot-ai/cli) installed:
 ```bash
 npx @knot-ai/cli app create --name "Knot Recall Demo" --write-env
 ```
 This automatically logs in via browser OAuth, provisions an application, and populates `.env.local`.
 
-#### Option B: Manual Setup
+#### Option C: Manual Setup
 Copy `.env.example` to `.env.local`:
 ```bash
 cp .env.example .env.local
@@ -82,8 +85,6 @@ KNOT_SECRET="knot_prod_your_secret_here"
 NEXT_PUBLIC_KNOT_CLIENT_ID="client_your_client_id"
 KNOT_BASE_URL="https://production.connectknot.com/api"
 ```
-
-> **Note**: Even without credentials, the app includes an interactive sandbox mode that runs out of the box!
 
 ### 4. Run the development server
 ```bash
@@ -149,21 +150,21 @@ npx firebase-tools deploy --only hosting
 
 ---
 
-## 🧠 Backend Integration Reference
+## 🧠 Frontend & Backend Integration Reference
 
-For builders implementing server-side routes in their own Node.js or Next.js applications, reference route handlers are provided in [`lib/server-examples/`](./lib/server-examples/):
+For builders implementing OAuth 2.1 PKCE or server-side routes in their own Node.js or Next.js applications, reference route handlers are provided in [`lib/server-examples/`](./lib/server-examples/):
 
-### 1. Frontend Drop-In Button
+### 1. Frontend Drop-In OAuth 2.1 Button (`mode="oauth"`)
 ```tsx
 import { ContinueWithKnot } from '@knot-ai/sdk/react';
 
 <ContinueWithKnot
-  clientId={process.env.NEXT_PUBLIC_KNOT_CLIENT_ID!}
-  externalUserId={currentUser.id}
+  mode="oauth"
   appName="My AI Application"
-  onSuccess={({ connectionId, reach, capabilities }) => {
-    // Save connectionId to your user profile
-    console.log('Connected with Knot:', connectionId);
+  knotUrl="https://production.connectknot.com"
+  onSuccess={({ accessToken, grantedScopes }) => {
+    // User logged into Knot and selected which projects & permissions to share!
+    console.log('Granted scopes:', grantedScopes);
   }}
 />
 ```

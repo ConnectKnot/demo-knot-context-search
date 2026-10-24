@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Search,
   Zap,
@@ -13,15 +13,62 @@ import {
   Activity,
   ArrowRight,
   ExternalLink,
+  RefreshCw,
+  FolderGit2,
+  SlidersHorizontal,
+  LogOut,
+  Lock,
+  Sparkles,
+  AlertCircle,
 } from "lucide-react";
 import { ContinueWithKnot } from "@knot-ai/sdk/react";
 
 interface ContextItem {
   id: string;
-  kind: "decision" | "fact" | "constraint" | "goal" | "preference" | string;
+  kind:
+    | "decision"
+    | "fact"
+    | "constraint"
+    | "goal"
+    | "preference"
+    | "project_state"
+    | "personal"
+    | string;
   statement: string;
+  title?: string;
+  rationale?: string | null;
   confidence?: string;
-  observed_at?: string;
+  entityId?: string;
+  entityName?: string;
+  sourceClientName?: string | null;
+  createdAt?: string;
+}
+
+interface ActiveThreadState {
+  id: string;
+  project_label?: string;
+  task_summary: string;
+  activity_summary?: string | null;
+  source?: string;
+  current?: boolean;
+  updated_at?: string;
+}
+
+interface KnotConnectionPermissions {
+  knotConnect?: boolean;
+  userContext?: boolean;
+  selectedContextCount?: number;
+  projectContextRead?: boolean;
+  projectContextContribute?: boolean;
+}
+
+interface KnotOAuthSession {
+  accessToken: string;
+  refreshToken?: string;
+  clientId: string;
+  redirectUri: string;
+  grantedScopes: string[];
+  connectedAt: string;
 }
 
 interface ChatResult {
@@ -37,41 +84,88 @@ const DEFAULT_INVARIANTS: ContextItem[] = [
     kind: "decision",
     statement: "Frontend uses React 19, Next.js 15 App Router, and Tailwind CSS v4.",
     confidence: "high",
+    entityName: "Knot Core & SDK",
+    sourceClientName: "Claude",
   },
   {
     id: "inv-2",
     kind: "fact",
     statement: "Primary database is PostgreSQL 16 on Neon with AES-256-GCM envelope encryption.",
     confidence: "high",
+    entityName: "Knot Core & SDK",
+    sourceClientName: "Cursor",
   },
   {
     id: "inv-3",
     kind: "constraint",
     statement: "Never persist raw chat transcripts or provider-private prompts to shared memory.",
     confidence: "high",
+    entityName: "Security & Privacy",
+    sourceClientName: "ChatGPT",
   },
   {
     id: "inv-4",
     kind: "goal",
     statement: "Maintain sub-50ms context retrieval latency across all MCP tool endpoints.",
     confidence: "high",
+    entityName: "Knot Core & SDK",
+    sourceClientName: "Antigravity",
   },
   {
     id: "inv-5",
     kind: "preference",
     statement: "Lead UI copy with 'Shared Brain' instead of generic AI memory middleware terminology.",
     confidence: "high",
+    entityName: "Developer Docs",
+    sourceClientName: "Claude",
   },
 ];
 
+function toBase64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function generateBrowserPkce(): Promise<{ verifier: string; challenge: string; state: string }> {
+  const verifierBytes = new Uint8Array(32);
+  window.crypto.getRandomValues(verifierBytes);
+  const verifier = toBase64Url(verifierBytes);
+
+  const stateBytes = new Uint8Array(24);
+  window.crypto.getRandomValues(stateBytes);
+  const state = toBase64Url(stateBytes);
+
+  const digest = await window.crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(verifier)
+  );
+  const challenge = toBase64Url(new Uint8Array(digest));
+
+  return { verifier, challenge, state };
+}
+
+const OAUTH_PENDING_KEY = "knot_recall_oauth_pending_v1";
+const SESSION_KEY_PREFIX = "knot_recall_session_v1_";
+
 export default function Home() {
   const [env, setEnv] = useState<"production" | "staging">("production");
-  const [connectionId, setConnectionId] = useState<string>("demo_conn_preview");
+  const [session, setSession] = useState<KnotOAuthSession | null>(null);
+  const [permissions, setPermissions] = useState<KnotConnectionPermissions | null>(null);
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTab] = useState<"search" | "chat" | "add" | "code">("search");
-  const [items, setItems] = useState<ContextItem[]>(DEFAULT_INVARIANTS);
-  const [loading, setLoading] = useState(false);
+  const [items, setItems] = useState<ContextItem[]>(DEFAULT_INVARTS_FALLBACK());
+  const [allInvariants, setAllInvariants] = useState<ContextItem[]>(DEFAULT_INVARTS_FALLBACK());
+  const [activeStates, setActiveStates] = useState<ActiveThreadState[]>([]);
+  const [knownProjects, setKnownProjects] = useState<string[]>([]);
+  const [selectedProject, setSelectedProject] = useState<string>("all");
   const [selectedKind, setSelectedKind] = useState<string>("all");
+  const [loading, setLoading] = useState(false);
 
   // Chat simulator state
   const [chatPrompt, setChatPrompt] = useState("What is our database stack and encryption policy?");
@@ -81,7 +175,10 @@ export default function Home() {
   // New invariant contribution state
   const [newStatement, setNewStatement] = useState("");
   const [newKind, setNewKind] = useState("decision");
+  const [newProjectHint, setNewProjectHint] = useState("");
   const [contributeStatus, setContributeStatus] = useState<string | null>(null);
+  const [contributeError, setContributeError] = useState<string | null>(null);
+  const [contributing, setContributing] = useState(false);
 
   // Staging ping state
   const [pingState, setPingState] = useState<"idle" | "pinging" | "ready" | "error">("idle");
@@ -89,46 +186,470 @@ export default function Home() {
 
   // Code snippet copy state
   const [copied, setCopied] = useState(false);
-
-  const healthUrl =
-    env === "staging"
-      ? "https://staging.connectknot.com/api/healthz"
-      : "https://production.connectknot.com/api/healthz";
+  // Preview modal toggle for developers who also want to inspect the embedded SDK sheet
+  const [showSdkPreviewButton, setShowSdkPreviewButton] = useState(false);
 
   const originUrl =
     env === "staging"
       ? "https://staging.connectknot.com"
       : "https://production.connectknot.com";
 
-  const [allInvariants, setAllInvariants] = useState<ContextItem[]>(DEFAULT_INVARIANTS);
+  const healthUrl = `${originUrl}/api/healthz`;
 
-  // Perform search query
-  const fetchItems = (q: string) => {
-    setLoading(true);
-    const matches = allInvariants.filter((item) => {
-      if (!q.trim()) return true;
-      return item.statement.toLowerCase().includes(q.toLowerCase());
-    });
-    setItems(matches);
-    setLoading(false);
+  // Helper to call Knot's authenticated MCP JSON-RPC endpoint directly
+  const callKnotMcp = useCallback(
+    async (
+      targetOrigin: string,
+      accessToken: string,
+      toolName: string,
+      args: Record<string, unknown> = {}
+    ) => {
+      const res = await fetch(`${targetOrigin}/api/mcp`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/event-stream",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: `${toolName}-${Date.now()}`,
+          method: "tools/call",
+          params: {
+            name: toolName,
+            arguments: args,
+          },
+        }),
+      });
+
+      if (res.status === 401 || res.status === 403) {
+        throw new Error("UNAUTHORIZED");
+      }
+
+      const payload = await res.json().catch(() => null);
+      if (!res.ok || !payload) {
+        throw new Error(`Knot MCP request failed (${res.status})`);
+      }
+      if (payload.error) {
+        throw new Error(payload.error.message || "MCP error");
+      }
+      if (payload.result?.isError) {
+        const errText =
+          payload.result?.content?.[0]?.text || "Knot tool execution returned an error.";
+        throw new Error(errText);
+      }
+      return payload.result?.structuredContent ?? payload.result ?? {};
+    },
+    []
+  );
+
+  // Sync live context from Knot for the authenticated user
+  const syncLiveKnotContext = useCallback(
+    async (
+      activeSession: KnotOAuthSession,
+      targetOrigin: string,
+      queryText = "",
+      projectFilter = "all"
+    ) => {
+      setLoading(true);
+      setAuthError(null);
+      try {
+        const trimmedQuery = queryText.trim().slice(0, 480);
+        const entityHint =
+          projectFilter !== "all" && projectFilter !== "__personal__"
+            ? projectFilter
+            : undefined;
+
+        const [statusRes, relevantRes, personalRes, activeStateRes] = await Promise.allSettled([
+          callKnotMcp(targetOrigin, activeSession.accessToken, "get_knot_connection_status", {}),
+          callKnotMcp(targetOrigin, activeSession.accessToken, "get_relevant_context", {
+            query: trimmedQuery,
+            ...(entityHint ? { entity_hint: entityHint } : {}),
+          }),
+          trimmedQuery
+            ? callKnotMcp(targetOrigin, activeSession.accessToken, "search_context", {
+                query: trimmedQuery,
+              })
+            : callKnotMcp(targetOrigin, activeSession.accessToken, "list_context", {
+                offset: 0,
+              }),
+          callKnotMcp(targetOrigin, activeSession.accessToken, "get_active_state", {}),
+        ]);
+
+        if (
+          (statusRes.status === "rejected" && statusRes.reason?.message === "UNAUTHORIZED") ||
+          (relevantRes.status === "rejected" && relevantRes.reason?.message === "UNAUTHORIZED")
+        ) {
+          window.localStorage.removeItem(`${SESSION_KEY_PREFIX}${env}`);
+          setSession(null);
+          setPermissions(null);
+          setAuthError("Your Knot connection expired or was revoked. Reconnect your Knot account.");
+          setAllInvariants(DEFAULT_INVARIANTS);
+          setItems(DEFAULT_INVARIANTS);
+          return;
+        }
+
+        if (statusRes.status === "fulfilled" && statusRes.value?.permissions) {
+          setPermissions(statusRes.value.permissions as KnotConnectionPermissions);
+        }
+
+        const mergedItems: ContextItem[] = [];
+        const discoveredProjects = new Set<string>();
+
+        if (relevantRes.status === "fulfilled" && Array.isArray(relevantRes.value?.items)) {
+          for (const raw of relevantRes.value.items) {
+            const pName = typeof raw.entityName === "string" && raw.entityName.trim()
+              ? raw.entityName.trim()
+              : undefined;
+            if (pName) discoveredProjects.add(pName);
+
+            mergedItems.push({
+              id: String(raw.id),
+              kind: String(raw.kind || "fact"),
+              statement: String(raw.statement || ""),
+              rationale: raw.rationale ?? null,
+              confidence: String(raw.confidence || "high"),
+              entityId: raw.entityId ? String(raw.entityId) : undefined,
+              entityName: pName,
+              sourceClientName: raw.sourceClientName ?? null,
+              createdAt: raw.createdAt ? String(raw.createdAt) : undefined,
+            });
+          }
+        }
+
+        if (
+          personalRes.status === "fulfilled" &&
+          Array.isArray(personalRes.value?.items) &&
+          (projectFilter === "all" || projectFilter === "__personal__")
+        ) {
+          for (const raw of personalRes.value.items) {
+            const title = typeof raw.title === "string" ? raw.title.trim() : "";
+            const content = typeof raw.content === "string" ? raw.content.trim() : "";
+            const statement = title && content ? `${title}: ${content}` : content || title;
+            if (!statement) continue;
+            mergedItems.push({
+              id: `personal-${raw.id}`,
+              kind: "personal",
+              title,
+              statement,
+              confidence: "high",
+              entityName: "Personal Memories",
+              sourceClientName:
+                typeof raw.provenance?.client_name === "string"
+                  ? raw.provenance.client_name
+                  : "Knot Vault",
+            });
+          }
+        }
+
+        if (activeStateRes.status === "fulfilled" && Array.isArray(activeStateRes.value?.states)) {
+          const states = activeStateRes.value.states as ActiveThreadState[];
+          setActiveStates(states);
+          for (const st of states) {
+            if (st.project_label && st.project_label.trim()) {
+              discoveredProjects.add(st.project_label.trim());
+            }
+          }
+        }
+
+        setKnownProjects((prev) => {
+          const combined = new Set([...prev, ...Array.from(discoveredProjects)]);
+          return Array.from(combined);
+        });
+
+        setAllInvariants(mergedItems);
+        setItems(mergedItems);
+      } catch (err) {
+        setAuthError(
+          err instanceof Error ? err.message : "Could not load context from your Knot account."
+        );
+      } finally {
+        setLoading(false);
+      }
+    },
+    [callKnotMcp, env]
+  );
+
+  // Start real OAuth 2.1 PKCE redirect to Knot's /authorize consent page
+  const handleStartRealKnotOAuth = async () => {
+    if (typeof window === "undefined") return;
+    setAuthLoading(true);
+    setAuthError(null);
+
+    try {
+      const redirectUri = `${window.location.origin}${window.location.pathname}`;
+
+      // 1. Dynamic Client Registration on the selected Knot environment
+      const regRes = await fetch(`${originUrl}/api/oauth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          client_name: "Knot Recall (Context Search Demo)",
+          redirect_uris: [redirectUri],
+        }),
+      });
+      const regData = await regRes.json().catch(() => ({}));
+      if (!regRes.ok || !regData.client_id) {
+        throw new Error(
+          regData.error_description ||
+            regData.message ||
+            "Could not register OAuth client with Knot."
+        );
+      }
+
+      // 2. Generate S256 PKCE verifier & challenge
+      const { verifier, challenge, state } = await generateBrowserPkce();
+
+      window.localStorage.setItem(
+        OAUTH_PENDING_KEY,
+        JSON.stringify({
+          verifier,
+          state,
+          clientId: regData.client_id,
+          redirectUri,
+          env,
+          originUrl,
+        })
+      );
+
+      // 3. Redirect user to Knot's real OAuth 2.1 consent page (/authorize)
+      // where they log in, choose specific projects ("Only selected projects" or "All my projects"),
+      // toggle permissions, and select individual memories.
+      const authorizeUrl = new URL(`${originUrl}/api/oauth/authorize`);
+      authorizeUrl.searchParams.set("client_id", regData.client_id);
+      authorizeUrl.searchParams.set("redirect_uri", redirectUri);
+      authorizeUrl.searchParams.set("response_type", "code");
+      authorizeUrl.searchParams.set("state", state);
+      authorizeUrl.searchParams.set("code_challenge", challenge);
+      authorizeUrl.searchParams.set("code_challenge_method", "S256");
+      authorizeUrl.searchParams.set(
+        "scope",
+        "knot:connect context:read active_state:read active_state:contribute context:contribute:project context:propose"
+      );
+
+      window.location.assign(authorizeUrl.toString());
+    } catch (err) {
+      setAuthLoading(false);
+      setAuthError(
+        err instanceof Error
+          ? err.message
+          : "Could not start Knot login. If using Staging, click 'Wake up staging' first."
+      );
+    }
   };
 
-  useEffect(() => {
-    fetchItems(searchQuery);
-  }, [searchQuery, allInvariants]);
+  // Disconnect and revoke OAuth token
+  const handleDisconnect = async () => {
+    if (!session) return;
+    const tokenToRevoke = session.accessToken;
+    const clientToRevoke = session.clientId;
+    window.localStorage.removeItem(`${SESSION_KEY_PREFIX}${env}`);
+    setSession(null);
+    setPermissions(null);
+    setKnownProjects([]);
+    setActiveStates([]);
+    setSelectedProject("all");
+    setAllInvariants(DEFAULT_INVARIANTS);
+    setItems(DEFAULT_INVARIANTS);
+    setChatResult(null);
 
+    try {
+      await fetch(`${originUrl}/api/oauth/revoke`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: tokenToRevoke, client_id: clientToRevoke }),
+      });
+    } catch {
+      // Ignore network errors on revoke cleanup
+    }
+  };
+
+  // On mount: check for OAuth 2.1 callback (?code=...&state=...) or existing saved session
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      const params = new URLSearchParams(window.location.search);
-      const tabParam = params.get("tab");
-      if (tabParam === "chat" || tabParam === "add" || tabParam === "code" || tabParam === "search") {
-        setActiveTab(tabParam);
-        if (tabParam === "chat") {
-          void handleRunChat();
+    if (typeof window === "undefined") return;
+
+    const params = new URLSearchParams(window.location.search);
+    const tabParam = params.get("tab");
+    if (
+      tabParam === "chat" ||
+      tabParam === "add" ||
+      tabParam === "code" ||
+      tabParam === "search"
+    ) {
+      setActiveTab(tabParam);
+    }
+
+    const code = params.get("code");
+    const returnedState = params.get("state");
+    const oauthError = params.get("error");
+
+    if (code || oauthError) {
+      const rawPending = window.localStorage.getItem(OAUTH_PENDING_KEY);
+      window.localStorage.removeItem(OAUTH_PENDING_KEY);
+
+      // Clean URL query params
+      const cleanUrl = new URL(window.location.href);
+      cleanUrl.searchParams.delete("code");
+      cleanUrl.searchParams.delete("state");
+      cleanUrl.searchParams.delete("error");
+      cleanUrl.searchParams.delete("error_description");
+      window.history.replaceState(
+        {},
+        document.title,
+        cleanUrl.pathname + cleanUrl.search + cleanUrl.hash
+      );
+
+      if (oauthError) {
+        setAuthError(
+          params.get("error_description") ||
+            (oauthError === "access_denied"
+              ? "You declined the Knot connection request."
+              : `OAuth error: ${oauthError}`)
+        );
+        return;
+      }
+
+      if (rawPending && code) {
+        try {
+          const pending = JSON.parse(rawPending) as {
+            verifier: string;
+            state: string;
+            clientId: string;
+            redirectUri: string;
+            env: "production" | "staging";
+            originUrl: string;
+          };
+
+          if (returnedState && pending.state !== returnedState) {
+            setAuthError("OAuth state mismatch. Please try connecting again.");
+            return;
+          }
+
+          setEnv(pending.env);
+          setAuthLoading(true);
+          void (async () => {
+            try {
+              const tokenRes = await fetch(`${pending.originUrl}/api/oauth/token`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  grant_type: "authorization_code",
+                  client_id: pending.clientId,
+                  code,
+                  redirect_uri: pending.redirectUri,
+                  code_verifier: pending.verifier,
+                }),
+              });
+              const tokenData = await tokenRes.json().catch(() => ({}));
+              if (!tokenRes.ok || !tokenData.access_token) {
+                throw new Error(
+                  tokenData.error_description ||
+                    tokenData.error ||
+                    "Failed to exchange Knot authorization code."
+                );
+              }
+
+              const grantedScopes =
+                typeof tokenData.scope === "string"
+                  ? tokenData.scope.split(/\s+/).filter(Boolean)
+                  : [];
+
+              const newSession: KnotOAuthSession = {
+                accessToken: tokenData.access_token,
+                refreshToken: tokenData.refresh_token,
+                clientId: pending.clientId,
+                redirectUri: pending.redirectUri,
+                grantedScopes,
+                connectedAt: new Date().toISOString(),
+              };
+
+              window.localStorage.setItem(
+                `${SESSION_KEY_PREFIX}${pending.env}`,
+                JSON.stringify(newSession)
+              );
+              setSession(newSession);
+              await syncLiveKnotContext(newSession, pending.originUrl, "", "all");
+            } catch (err) {
+              setAuthError(
+                err instanceof Error ? err.message : "Failed to complete Knot OAuth login."
+              );
+            } finally {
+              setAuthLoading(false);
+            }
+          })();
+          return;
+        } catch {
+          setAuthError("Invalid OAuth session state. Please try connecting again.");
         }
       }
     }
-  }, []);
+  }, [syncLiveKnotContext]);
+
+  // Load saved session when switching between Production and Staging
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    // Skip if currently exchanging OAuth code
+    if (new URLSearchParams(window.location.search).has("code")) return;
+
+    const savedRaw = window.localStorage.getItem(`${SESSION_KEY_PREFIX}${env}`);
+    if (savedRaw) {
+      try {
+        const parsed = JSON.parse(savedRaw) as KnotOAuthSession;
+        if (parsed?.accessToken) {
+          setSession(parsed);
+          const targetOrigin =
+            env === "staging"
+              ? "https://staging.connectknot.com"
+              : "https://production.connectknot.com";
+          void syncLiveKnotContext(parsed, targetOrigin, searchQuery, selectedProject);
+          return;
+        }
+      } catch {
+        window.localStorage.removeItem(`${SESSION_KEY_PREFIX}${env}`);
+      }
+    }
+
+    setSession(null);
+    setPermissions(null);
+    setKnownProjects([]);
+    setActiveStates([]);
+    setSelectedProject("all");
+    setAllInvariants(DEFAULT_INVARIANTS);
+    setItems(DEFAULT_INVARIANTS);
+  }, [env]);
+
+  // Debounced live search when connected, or client-side filter when in demo preview
+  useEffect(() => {
+    if (!session) {
+      const q = searchQuery.trim().toLowerCase();
+      const matches = allInvariants.filter((item) => {
+        if (
+          selectedProject !== "all" &&
+          selectedProject !== "__personal__" &&
+          item.entityName !== selectedProject
+        ) {
+          return false;
+        }
+        if (selectedProject === "__personal__" && item.kind !== "personal") {
+          return false;
+        }
+        if (!q) return true;
+        return (
+          item.statement.toLowerCase().includes(q) ||
+          (item.entityName && item.entityName.toLowerCase().includes(q)) ||
+          item.kind.toLowerCase().includes(q)
+        );
+      });
+      setItems(matches);
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      void syncLiveKnotContext(session, originUrl, searchQuery, selectedProject);
+    }, 260);
+
+    return () => clearTimeout(timer);
+  }, [searchQuery, selectedProject, session, originUrl, syncLiveKnotContext]);
 
   // Ping handler
   const handlePing = async () => {
@@ -144,74 +665,191 @@ export default function Home() {
     }
   };
 
-  // Run chat simulator
+  // Run Turn-0 chat simulator against real Knot context (or demo fallback)
   const handleRunChat = async () => {
     if (!chatPrompt.trim()) return;
     setChatLoading(true);
 
-    // Simulate 350ms ambient retrieval and generation
-    await new Promise((resolve) => setTimeout(resolve, 350));
+    try {
+      let matched: ContextItem[] = [];
 
-    const matched = allInvariants.slice(0, 3);
-    const injectedPrompt = `You are an AI assistant. You have ambient access to the user's verified project invariants from their Knot Shared Brain:
-${matched.map((inv) => `• [${inv.kind.toUpperCase()}] ${inv.statement}`).join("\n")}
+      if (session) {
+        const entityHint =
+          selectedProject !== "all" && selectedProject !== "__personal__"
+            ? selectedProject
+            : undefined;
+        const relevant = await callKnotMcp(
+          originUrl,
+          session.accessToken,
+          "get_relevant_context",
+          {
+            query: chatPrompt.trim().slice(0, 480),
+            ...(entityHint ? { entity_hint: entityHint } : {}),
+          }
+        );
+        if (Array.isArray(relevant?.items) && relevant.items.length > 0) {
+          matched = relevant.items.slice(0, 5).map((raw: Record<string, unknown>) => ({
+            id: String(raw.id),
+            kind: String(raw.kind || "fact"),
+            statement: String(raw.statement || ""),
+            confidence: String(raw.confidence || "high"),
+            entityName: typeof raw.entityName === "string" ? raw.entityName : undefined,
+            sourceClientName:
+              typeof raw.sourceClientName === "string" ? raw.sourceClientName : null,
+          }));
+        }
+      }
+
+      if (matched.length === 0) {
+        matched = (items.length > 0 ? items : allInvariants).slice(0, 4);
+      }
+
+      const injectedLines =
+        matched.length > 0
+          ? matched
+              .map(
+                (inv) =>
+                  `• [${inv.kind.toUpperCase()}${inv.entityName ? ` · ${inv.entityName}` : ""}] ${inv.statement}`
+              )
+              .join("\n")
+          : "• (No matching invariants shared for this query yet)";
+
+      const injectedPrompt = `You are an AI assistant. You have ambient access to the user's verified project invariants from their Knot Shared Brain:
+${injectedLines}
 
 Answer the user's query while strictly honoring these decisions and constraints.`;
 
-    const mockAnswer = `Based on your verified project invariants in Knot:
-- Your application is architected with React 19 and Next.js 15 App Router.
-- Privacy guardrails enforce that zero raw chat transcripts are saved to shared memory.
+      const summaryBullets =
+        matched.length > 0
+          ? matched.map((inv) => `- ${inv.statement}`).join("\n")
+          : "- Connect your Knot account or share project decisions to ground Turn-0 responses.";
 
-Your prompt "${chatPrompt}" was answered with full awareness of your tech stack and architectural rules, without requiring any background explanations on Turn 0.`;
+      const groundedAnswer = session
+        ? `Grounded in ${matched.length} live item${matched.length === 1 ? "" : "s"} from your connected Knot account:\n${summaryBullets}\n\nYour prompt "${chatPrompt}" was answered using your real shared Knot context on Turn 0 without re-explaining your stack.`
+        : `Based on the sample preview invariants:\n${summaryBullets}\n\nConnect your Knot account above to run this Turn-0 simulation against your own projects and permissions.`;
 
-    setChatResult({
-      systemPrompt: injectedPrompt,
-      retrievedInvariants: matched,
-      answer: mockAnswer,
-    });
-    setChatLoading(false);
+      setChatResult({
+        systemPrompt: injectedPrompt,
+        retrievedInvariants: matched,
+        answer: groundedAnswer,
+      });
+    } catch (err) {
+      setAuthError(
+        err instanceof Error ? err.message : "Could not run Turn-0 query against Knot."
+      );
+    } finally {
+      setChatLoading(false);
+    }
   };
 
-  // Add invariant contribution
-  const handleContribute = (e: React.FormEvent) => {
+  // Add invariant contribution (real writeback to Knot when connected!)
+  const handleContribute = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newStatement.trim()) return;
-    setContributeStatus("saving");
+    if (!newStatement.trim() || contributing) return;
+    setContributing(true);
+    setContributeStatus(null);
+    setContributeError(null);
 
-    const newItem: ContextItem = {
-      id: `inv-${Date.now()}`,
-      kind: newKind as ContextItem["kind"],
-      statement: newStatement.trim(),
-      confidence: "high",
-    };
+    try {
+      if (session) {
+        const targetProject =
+          newProjectHint.trim() ||
+          (selectedProject !== "all" && selectedProject !== "__personal__"
+            ? selectedProject
+            : knownProjects[0] || undefined);
 
-    setAllInvariants((prev) => [newItem, ...prev]);
-    setContributeStatus("Saved successfully to Shared Brain!");
-    setNewStatement("");
-    setTimeout(() => setContributeStatus(null), 3000);
+        const res = await callKnotMcp(originUrl, session.accessToken, "propose_context", {
+          kind: newKind,
+          statement: newStatement.trim(),
+          confidence: "high",
+          ...(targetProject ? { entity_hint: targetProject } : {}),
+          idempotency_key: `recall_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        });
+
+        const statusLabel =
+          res?.status === "accepted"
+            ? `Saved directly to your Knot project (${res?.entityName || targetProject || "Shared Brain"})!`
+            : "Submitted to your Knot approval queue! Review it in Your Knot.";
+
+        setContributeStatus(statusLabel);
+        setNewStatement("");
+        await syncLiveKnotContext(session, originUrl, searchQuery, selectedProject);
+      } else {
+        const newItem: ContextItem = {
+          id: `inv-${Date.now()}`,
+          kind: newKind as ContextItem["kind"],
+          statement: newStatement.trim(),
+          confidence: "high",
+          entityName: newProjectHint.trim() || "Sandbox Preview",
+          sourceClientName: "Knot Recall Demo",
+        };
+        setAllInvariants((prev) => [newItem, ...prev]);
+        setContributeStatus(
+          "Saved to local preview! Connect your Knot account above to write directly to your real Shared Brain."
+        );
+        setNewStatement("");
+      }
+    } catch (err) {
+      setContributeError(
+        err instanceof Error
+          ? err.message
+          : "Could not save item to Knot. Make sure you granted project write or propose permissions during login."
+      );
+    } finally {
+      setContributing(false);
+      setTimeout(() => setContributeStatus(null), 5000);
+    }
   };
 
-  const filteredItems = items.filter((item) =>
-    selectedKind === "all" ? true : item.kind === selectedKind
-  );
+  const projectOptions = useMemo(() => {
+    const set = new Set<string>(knownProjects);
+    for (const item of allInvariants) {
+      if (item.entityName && item.entityName !== "Personal Memories") {
+        set.add(item.entityName);
+      }
+    }
+    return Array.from(set);
+  }, [knownProjects, allInvariants]);
 
-  const integrationCodeSnippet = `import { KnotClient } from '@knot-ai/sdk';
+  const filteredItems = items.filter((item) => {
+    if (selectedProject === "__personal__" && item.kind !== "personal") return false;
+    if (
+      selectedProject !== "all" &&
+      selectedProject !== "__personal__" &&
+      item.entityName !== selectedProject
+    ) {
+      return false;
+    }
+    if (selectedKind === "all") return true;
+    return item.kind === selectedKind;
+  });
 
-// 1. Initialize client
-const knot = new KnotClient({
-  secret: process.env.KNOT_SECRET!, // set in .env
-  baseUrl: '${originUrl}/api',
-});
+  const integrationCodeSnippet = `import { ContinueWithKnot } from '@knot-ai/sdk/react';
 
-// 2. Query user's verified invariants on Turn 0
-const { current } = await knot.query(user.knotConnectionId, {
-  query: userPrompt,
-  limit: 5,
-});
-
-// 3. Prepend into your LLM system prompt
-const invariants = current.map(item => \`[\${item.kind.toUpperCase()}] \${item.statement}\`).join('\\n');
-const systemPrompt = \`You are an assistant. User verified rules:\\n\${invariants}\`;`;
+// 1. Render real OAuth 2.1 PKCE login so users pick which Knot projects & permissions to share
+<ContinueWithKnot
+  mode="oauth"
+  appName="Knot Recall Demo"
+  knotUrl="${originUrl}"
+  onSuccess={async ({ accessToken }) => {
+    // 2. Search the user's approved project invariants & memories on Turn 0
+    const res = await fetch('${originUrl}/api/mcp', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: \`Bearer \${accessToken}\`,
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'tools/call',
+        params: { name: 'get_relevant_context', arguments: { query: userPrompt } },
+      }),
+    });
+    const { result } = await res.json();
+    console.log('Shared project invariants:', result.structuredContent.items);
+  }}
+/>`;
 
   return (
     <div className="min-h-screen bg-[#fbfaf8] dark:bg-[#0e100d] text-[#151714] dark:text-[#ededec] transition-colors">
@@ -225,8 +863,19 @@ const systemPrompt = \`You are an assistant. User verified rules:\\n\${invariant
               </span>
               <span>Knot Recall</span>
             </span>
-            <span className="hidden sm:inline-block text-xs font-mono px-2 py-0.5 rounded-full bg-black/5 dark:bg-white/10 text-muted-foreground">
-              Demo App
+            <span
+              className={`hidden sm:inline-flex items-center gap-1.5 text-xs font-mono px-2.5 py-0.5 rounded-full ${
+                session
+                  ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-semibold"
+                  : "bg-black/5 dark:bg-white/10 text-muted-foreground"
+              }`}
+            >
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  session ? "bg-emerald-500 animate-pulse" : "bg-zinc-400"
+                }`}
+              />
+              {session ? "Live Knot Account Connected" : "Sandbox Preview"}
             </span>
           </div>
 
@@ -236,7 +885,7 @@ const systemPrompt = \`You are an assistant. User verified rules:\\n\${invariant
               <button
                 type="button"
                 onClick={() => setEnv("production")}
-                className={`px-3 py-1 rounded-md transition-all ${
+                className={`px-3 py-1 rounded-md transition-all cursor-pointer ${
                   env === "production"
                     ? "bg-white dark:bg-zinc-800 text-black dark:text-white shadow-xs font-semibold"
                     : "text-muted-foreground hover:text-black dark:hover:text-white"
@@ -247,7 +896,7 @@ const systemPrompt = \`You are an assistant. User verified rules:\\n\${invariant
               <button
                 type="button"
                 onClick={() => setEnv("staging")}
-                className={`px-3 py-1 rounded-md transition-all ${
+                className={`px-3 py-1 rounded-md transition-all cursor-pointer ${
                   env === "staging"
                     ? "bg-white dark:bg-zinc-800 text-black dark:text-white shadow-xs font-semibold"
                     : "text-muted-foreground hover:text-black dark:hover:text-white"
@@ -258,7 +907,7 @@ const systemPrompt = \`You are an assistant. User verified rules:\\n\${invariant
             </div>
 
             <a
-              href="https://github.com/Knot-Repo/knot-sdk"
+              href="https://github.com/Knot-Repo/demo-knot-context-search"
               target="_blank"
               rel="noopener noreferrer"
               className="text-xs font-semibold underline text-foreground/80 hover:text-foreground hidden sm:flex items-center gap-1"
@@ -304,45 +953,237 @@ const systemPrompt = \`You are an assistant. User verified rules:\\n\${invariant
           </div>
         )}
 
-        {/* Hero Card & Drop-in Auth Connection */}
-        <div className="rounded-2xl border border-black/10 dark:border-white/10 bg-white dark:bg-zinc-900/50 p-6 sm:p-8 flex flex-col md:flex-row items-start md:items-center justify-between gap-6 shadow-xs">
+        {/* OAuth Error Banner */}
+        {authError && (
+          <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-4 flex items-start justify-between gap-3 text-xs text-red-900 dark:text-red-200">
+            <div className="flex items-start gap-2">
+              <AlertCircle size={15} className="shrink-0 mt-0.5 text-red-600 dark:text-red-400" />
+              <span>{authError}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setAuthError(null)}
+              className="text-xs font-semibold underline shrink-0"
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
+        {/* Hero Card & Real Knot OAuth Connection */}
+        <div className="rounded-2xl border border-black/10 dark:border-white/10 bg-white dark:bg-zinc-900/50 p-6 sm:p-8 flex flex-col lg:flex-row items-start lg:items-center justify-between gap-6 shadow-xs">
           <div className="space-y-2 max-w-2xl">
             <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 px-2.5 py-0.5 rounded-full">
               <ShieldCheck size={13} />
               <span>One Shared Brain for All Your AIs</span>
             </div>
             <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">
-              Search your user&apos;s project invariants on Turn 0.
+              Search your real Knot project invariants on Turn 0.
             </h1>
             <p className="text-sm text-foreground/65 leading-relaxed">
-              When a user connects Knot, your app queries their tech stack, architectural decisions, and rules established across ChatGPT, Claude, and Cursor without manual prompt copying.
+              Log in with your Knot account, pick which projects and permissions to share on Knot&apos;s consent screen, and search your live decisions, facts, and personal memories across ChatGPT, Claude, and Cursor.
             </p>
           </div>
 
-          <div className="shrink-0 flex flex-col items-center md:items-end gap-2 w-full md:w-auto">
-            <ContinueWithKnot
-              clientId="demo_search_client"
-              externalUserId="demo_user_123"
-              appName="Knot Recall Demo"
-              knotUrl={originUrl}
-              onSuccess={(result) => {
-                setConnectionId(result.connectionId);
-                alert(`Connected to Knot!\nConnection ID: ${result.connectionId}\nReach: ${result.reach}`);
-              }}
-            />
-            <span className="text-[11px] font-mono text-muted-foreground">
-              Connection: {connectionId.slice(0, 16)}...
-            </span>
+          <div className="shrink-0 flex flex-col items-stretch sm:items-end gap-2.5 w-full lg:w-auto">
+            {!session ? (
+              <div className="flex flex-col sm:items-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleStartRealKnotOAuth()}
+                  disabled={authLoading}
+                  data-testid="real-continue-with-knot-button"
+                  className="knot-button min-h-[2.75rem] px-5 py-2.5 text-sm font-semibold inline-flex items-center justify-center gap-2.5 shadow-sm cursor-pointer disabled:opacity-60"
+                >
+                  <img
+                    src="/knot-mark.webp"
+                    alt="Knot"
+                    className="h-4 w-auto brightness-0 invert"
+                  />
+                  <span>
+                    {authLoading
+                      ? `Redirecting to Knot (${env})...`
+                      : "Continue with Knot"}
+                  </span>
+                </button>
+                <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
+                  <span className="inline-flex items-center gap-1">
+                    <Lock size={11} />
+                    OAuth 2.1 PKCE · Choose projects &amp; scopes on{" "}
+                    <strong className="text-foreground/80">
+                      {env === "staging" ? "staging.connectknot.com" : "connectknot.com"}
+                    </strong>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setShowSdkPreviewButton((v) => !v)}
+                    className="underline hover:text-foreground cursor-pointer"
+                  >
+                    {showSdkPreviewButton ? "Hide SDK UI preview" : "Preview embedded SDK modal"}
+                  </button>
+                </div>
+                {showSdkPreviewButton && (
+                  <div className="pt-1">
+                    <ContinueWithKnot
+                      clientId="demo_search_client"
+                      externalUserId="demo_user_123"
+                      appName="Knot Recall Demo"
+                      knotUrl={originUrl}
+                      variant="secondary"
+                      label="Open Embedded SDK Sheet (UI Preview)"
+                    />
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 dark:bg-zinc-900 p-4 space-y-3 w-full sm:min-w-[330px]">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+                    <span className="text-xs font-semibold text-foreground">
+                      Connected to Knot ({env === "staging" ? "Staging" : "Production"})
+                    </span>
+                  </div>
+                  <span className="text-[11px] font-mono text-muted-foreground">
+                    {allInvariants.length} shared items
+                  </span>
+                </div>
+
+                {/* Granted Permission Badges */}
+                <div className="flex flex-wrap gap-1.5">
+                  <span
+                    className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
+                      permissions?.projectContextRead !== false
+                        ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-300"
+                        : "bg-black/5 border-black/10 text-muted-foreground"
+                    }`}
+                  >
+                    Project Read: {permissions?.projectContextRead !== false ? "Granted" : "Off"}
+                  </span>
+                  <span
+                    className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
+                      permissions?.projectContextContribute
+                        ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-300"
+                        : "bg-black/5 border-black/10 text-muted-foreground"
+                    }`}
+                  >
+                    Project Write: {permissions?.projectContextContribute ? "Granted" : "Read-only"}
+                  </span>
+                  {typeof permissions?.selectedContextCount === "number" && (
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border bg-black/5 dark:bg-white/5 border-black/10 dark:border-white/10 text-foreground/80">
+                      {permissions.selectedContextCount} Personal Memories
+                    </span>
+                  )}
+                </div>
+
+                {/* Action buttons: Adjust Projects/Permissions on Knot, Refresh, Disconnect */}
+                <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-black/10 dark:border-white/10">
+                  <button
+                    type="button"
+                    onClick={() => void handleStartRealKnotOAuth()}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-foreground text-background text-[11px] font-semibold hover:opacity-90 transition-all cursor-pointer"
+                  >
+                    <SlidersHorizontal size={11} />
+                    <span>Change Shared Projects &amp; Permissions</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void syncLiveKnotContext(session, originUrl, searchQuery, selectedProject)
+                    }
+                    disabled={loading}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-black/15 dark:border-white/15 text-[11px] font-medium hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer disabled:opacity-50"
+                  >
+                    <RefreshCw size={11} className={loading ? "animate-spin" : ""} />
+                    <span>Sync</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleDisconnect()}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-red-500/25 text-red-600 dark:text-red-400 text-[11px] font-medium hover:bg-red-500/10 cursor-pointer"
+                  >
+                    <LogOut size={11} />
+                    <span>Disconnect</span>
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
+        {/* Notice when viewing Sandbox Preview data */}
+        {!session && (
+          <div className="rounded-xl border border-black/10 dark:border-white/10 bg-black/[0.03] dark:bg-white/[0.03] px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-2 text-foreground/80">
+              <Sparkles size={14} className="text-amber-600 dark:text-amber-400 shrink-0" />
+              <span>
+                Showing <strong>5 sample invariants</strong> in preview mode. Click{" "}
+                <strong>Continue with Knot</strong> above to log into your Knot account, choose which projects and permissions to share, and search your real context.
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => void handleStartRealKnotOAuth()}
+              className="text-xs font-semibold underline shrink-0 text-left sm:text-right cursor-pointer"
+            >
+              Connect real Knot account →
+            </button>
+          </div>
+        )}
+
+        {/* Shared Project Filter Bar (populated from the user's shared Knot projects) */}
+        <div className="flex items-center gap-2 overflow-x-auto pb-1">
+          <span className="inline-flex items-center gap-1 text-xs font-mono uppercase tracking-wider text-muted-foreground shrink-0 mr-1">
+            <FolderGit2 size={13} />
+            <span>Projects:</span>
+          </span>
+          <button
+            type="button"
+            onClick={() => setSelectedProject("all")}
+            className={`px-3 py-1.5 rounded-full text-xs font-medium transition-all shrink-0 cursor-pointer ${
+              selectedProject === "all"
+                ? "bg-foreground text-background font-semibold"
+                : "bg-white dark:bg-zinc-900 border border-black/10 dark:border-white/10 text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            All Shared Projects ({allInvariants.length})
+          </button>
+          {projectOptions.map((proj) => (
+            <button
+              key={proj}
+              type="button"
+              onClick={() => setSelectedProject(proj)}
+              className={`px-3 py-1.5 rounded-full text-xs font-medium transition-all shrink-0 cursor-pointer ${
+                selectedProject === proj
+                  ? "bg-foreground text-background font-semibold"
+                  : "bg-white dark:bg-zinc-900 border border-black/10 dark:border-white/10 text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {proj}
+            </button>
+          ))}
+          {session && (
+            <button
+              type="button"
+              onClick={() => setSelectedProject("__personal__")}
+              className={`px-3 py-1.5 rounded-full text-xs font-medium transition-all shrink-0 cursor-pointer ${
+                selectedProject === "__personal__"
+                  ? "bg-foreground text-background font-semibold"
+                  : "bg-white dark:bg-zinc-900 border border-black/10 dark:border-white/10 text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              Personal Memories
+            </button>
+          )}
+        </div>
+
         {/* Tab Navigation */}
-        <div className="flex border-b border-black/10 dark:border-white/10 gap-2">
+        <div className="flex border-b border-black/10 dark:border-white/10 gap-2 overflow-x-auto">
           {[
             { id: "search", label: "Context Search", icon: Search },
             { id: "chat", label: "Turn-0 AI Prompt Simulator", icon: Bot },
             { id: "add", label: "Add Decision (Writeback)", icon: PlusCircle },
-            { id: "code", label: "12-Line Integration Code", icon: Code2 },
+            { id: "code", label: "Integration Code", icon: Code2 },
           ].map((tab) => {
             const Icon = tab.icon;
             const active = activeTab === tab.id;
@@ -351,7 +1192,7 @@ const systemPrompt = \`You are an assistant. User verified rules:\\n\${invariant
                 key={tab.id}
                 type="button"
                 onClick={() => setActiveTab(tab.id as typeof activeTab)}
-                className={`inline-flex items-center gap-2 py-3 px-4 text-xs font-semibold border-b-2 transition-all cursor-pointer ${
+                className={`inline-flex items-center gap-2 py-3 px-4 text-xs font-semibold border-b-2 transition-all shrink-0 cursor-pointer ${
                   active
                     ? "border-foreground text-foreground"
                     : "border-transparent text-muted-foreground hover:text-foreground"
@@ -372,7 +1213,11 @@ const systemPrompt = \`You are an assistant. User verified rules:\\n\${invariant
                 <Search className="absolute left-3.5 top-3.5 h-4 w-4 text-foreground/40" />
                 <input
                   type="text"
-                  placeholder="Search decisions, database stack, encryption constraints, or goals..."
+                  placeholder={
+                    session
+                      ? "Search your live Knot project decisions, architecture facts, constraints, or memories..."
+                      : "Search decisions, database stack, encryption constraints, or goals..."
+                  }
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   className="w-full h-11 pl-10 pr-4 rounded-xl bg-white dark:bg-zinc-900 border border-black/10 dark:border-white/10 text-sm focus:outline-none focus:ring-2 focus:ring-foreground transition-all"
@@ -381,48 +1226,119 @@ const systemPrompt = \`You are an assistant. User verified rules:\\n\${invariant
 
               {/* Kind Filters */}
               <div className="flex items-center gap-1 overflow-x-auto pb-1">
-                {["all", "decision", "fact", "constraint", "goal", "preference"].map((k) => (
+                {[
+                  "all",
+                  "decision",
+                  "fact",
+                  "constraint",
+                  "goal",
+                  "preference",
+                  "project_state",
+                  ...(session ? ["personal"] : []),
+                ].map((k) => (
                   <button
                     key={k}
                     type="button"
                     onClick={() => setSelectedKind(k)}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-medium capitalize transition-all cursor-pointer ${
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium capitalize transition-all shrink-0 cursor-pointer ${
                       selectedKind === k
                         ? "bg-foreground text-background font-semibold"
                         : "bg-black/5 dark:bg-white/5 text-muted-foreground hover:text-foreground"
                     }`}
                   >
-                    {k}
+                    {k.replace("_", " ")}
                   </button>
                 ))}
               </div>
             </div>
+
+            {loading && (
+              <div className="text-xs font-mono text-muted-foreground flex items-center gap-2 py-2">
+                <RefreshCw size={12} className="animate-spin" />
+                <span>Querying encrypted project invariants from Knot...</span>
+              </div>
+            )}
 
             {/* Results Grid */}
             <div className="grid gap-3 sm:grid-cols-2">
               {filteredItems.map((item) => (
                 <div
                   key={item.id}
-                  className="rounded-xl border border-black/10 dark:border-white/10 bg-white dark:bg-zinc-900/60 p-4 space-y-2 hover:border-black/25 dark:hover:border-white/25 transition-all"
+                  className="rounded-xl border border-black/10 dark:border-white/10 bg-white dark:bg-zinc-900/60 p-4 space-y-2.5 hover:border-black/25 dark:hover:border-white/25 transition-all flex flex-col justify-between"
                 >
-                  <div className="flex items-center justify-between">
-                    <span className="text-[10px] font-mono font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-black/5 dark:bg-white/10">
-                      {item.kind}
-                    </span>
-                    <span className="text-[11px] font-mono text-muted-foreground">
-                      {item.confidence || "high"} confidence
-                    </span>
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="text-[10px] font-mono font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-black/5 dark:bg-white/10">
+                          {item.kind.replace("_", " ")}
+                        </span>
+                        {item.entityName && (
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/20">
+                            {item.entityName}
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-[11px] font-mono text-muted-foreground">
+                        {item.sourceClientName
+                          ? `via ${item.sourceClientName}`
+                          : `${item.confidence || "high"} confidence`}
+                      </span>
+                    </div>
+                    <p className="text-sm font-medium leading-relaxed">{item.statement}</p>
+                    {item.rationale && (
+                      <p className="text-xs text-muted-foreground leading-relaxed border-l-2 border-black/15 dark:border-white/15 pl-2.5">
+                        {item.rationale}
+                      </p>
+                    )}
                   </div>
-                  <p className="text-sm font-medium leading-relaxed">{item.statement}</p>
                 </div>
               ))}
 
               {filteredItems.length === 0 && !loading && (
-                <div className="col-span-2 text-center py-12 rounded-xl border border-dashed border-black/15 dark:border-white/15">
-                  <p className="text-sm text-muted-foreground">No matching invariants found.</p>
+                <div className="col-span-2 text-center py-12 rounded-xl border border-dashed border-black/15 dark:border-white/15 space-y-2 px-4">
+                  <p className="text-sm font-medium text-foreground">
+                    No matching context items found.
+                  </p>
+                  <p className="text-xs text-muted-foreground max-w-md mx-auto">
+                    {session
+                      ? "Try clearing your search query or click 'Change Shared Projects & Permissions' above to grant access to additional projects in your Knot account."
+                      : "Try a different keyword or connect your Knot account to search your real projects."}
+                  </p>
                 </div>
               )}
             </div>
+
+            {/* Active Continuity Threads from Connected AIs */}
+            {session && activeStates.length > 0 && (
+              <div className="pt-4 space-y-2.5">
+                <h3 className="text-xs font-mono uppercase tracking-wider text-muted-foreground">
+                  Recent Active Threads Across Your Connected AIs ({activeStates.length})
+                </h3>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {activeStates.slice(0, 4).map((st) => (
+                    <div
+                      key={st.id}
+                      className="rounded-xl border border-black/10 dark:border-white/10 bg-black/[0.02] dark:bg-white/[0.02] p-3.5 space-y-1.5"
+                    >
+                      <div className="flex items-center justify-between text-[11px] font-mono">
+                        <span className="font-semibold text-foreground">
+                          {st.project_label || "General Workspace"}
+                        </span>
+                        {st.source && (
+                          <span className="text-muted-foreground">via {st.source}</span>
+                        )}
+                      </div>
+                      <p className="text-xs font-medium text-foreground/90">{st.task_summary}</p>
+                      {st.activity_summary && (
+                        <p className="text-[11px] text-muted-foreground line-clamp-2">
+                          {st.activity_summary}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -432,7 +1348,9 @@ const systemPrompt = \`You are an assistant. User verified rules:\\n\${invariant
             <div className="space-y-1">
               <h2 className="text-base font-semibold">Turn-0 System Prompt Simulator</h2>
               <p className="text-xs text-muted-foreground">
-                Observe how Knot context is automatically retrieved and injected into your model&apos;s system prompt.
+                {session
+                  ? "Queries your live Knot account for relevant invariants and injects them into the Turn-0 system prompt."
+                  : "Observe how Knot context is automatically retrieved and injected into your model's system prompt."}
               </p>
             </div>
 
@@ -441,16 +1359,16 @@ const systemPrompt = \`You are an assistant. User verified rules:\\n\${invariant
                 type="text"
                 value={chatPrompt}
                 onChange={(e) => setChatPrompt(e.target.value)}
-                placeholder="Enter prompt for the AI (e.g. What database stack do we use?)"
+                placeholder="Enter prompt for the AI (e.g. What database stack or architecture rules do we use?)"
                 className="flex-1 h-11 px-4 rounded-xl bg-white dark:bg-zinc-900 border border-black/10 dark:border-white/10 text-sm focus:outline-none focus:ring-2 focus:ring-foreground"
               />
               <button
                 type="button"
-                onClick={handleRunChat}
+                onClick={() => void handleRunChat()}
                 disabled={chatLoading || !chatPrompt.trim()}
                 className="px-5 h-11 rounded-xl bg-foreground text-background font-semibold text-xs inline-flex items-center gap-2 hover:opacity-90 transition-all cursor-pointer disabled:opacity-50"
               >
-                <span>{chatLoading ? "Injecting..." : "Simulate Turn 0"}</span>
+                <span>{chatLoading ? "Querying Knot..." : "Simulate Turn 0"}</span>
                 <ArrowRight size={14} />
               </button>
             </div>
@@ -460,7 +1378,7 @@ const systemPrompt = \`You are an assistant. User verified rules:\\n\${invariant
                 {/* Injected System Prompt */}
                 <div className="rounded-xl border border-black/10 dark:border-white/10 bg-white dark:bg-zinc-900 p-4 space-y-2">
                   <span className="text-xs font-mono font-bold text-primary">
-                    1. Injected System Prompt
+                    1. Injected System Prompt ({chatResult.retrievedInvariants.length} items)
                   </span>
                   <pre className="text-xs font-mono bg-black/5 dark:bg-black/40 p-3 rounded-lg overflow-x-auto whitespace-pre-wrap leading-relaxed">
                     {chatResult.systemPrompt}
@@ -487,25 +1405,53 @@ const systemPrompt = \`You are an assistant. User verified rules:\\n\${invariant
             <div className="space-y-1">
               <h2 className="text-base font-semibold">Contribute a New Invariant</h2>
               <p className="text-xs text-muted-foreground">
-                Save an architectural decision back to Knot. Connected tools (Cursor, Claude, ChatGPT) immediately know about it too.
+                {session
+                  ? "Save a decision or fact directly back to your connected Knot account. Connected tools (Cursor, Claude, ChatGPT) immediately stay in sync."
+                  : "Save an architectural decision back to Knot. Connect your Knot account above to write directly to your live Shared Brain."}
               </p>
             </div>
 
-            <form onSubmit={handleContribute} className="space-y-4">
-              <div>
-                <label className="text-xs font-medium text-muted-foreground block mb-1">
-                  Invariant Kind
-                </label>
-                <select
-                  value={newKind}
-                  onChange={(e) => setNewKind(e.target.value)}
-                  className="w-full h-10 px-3 rounded-lg bg-white dark:bg-zinc-900 border border-black/10 dark:border-white/10 text-xs font-medium"
-                >
-                  <option value="decision">Decision (Architectural choice)</option>
-                  <option value="fact">Fact (Technical stack, API version)</option>
-                  <option value="constraint">Constraint (Security or privacy rule)</option>
-                  <option value="goal">Goal (Milestone or target)</option>
-                </select>
+            <form onSubmit={(e) => void handleContribute(e)} className="space-y-4">
+              <div className="grid sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground block mb-1">
+                    Invariant Kind
+                  </label>
+                  <select
+                    value={newKind}
+                    onChange={(e) => setNewKind(e.target.value)}
+                    className="w-full h-10 px-3 rounded-lg bg-white dark:bg-zinc-900 border border-black/10 dark:border-white/10 text-xs font-medium"
+                  >
+                    <option value="decision">Decision (Architectural choice)</option>
+                    <option value="fact">Fact (Technical stack, API version)</option>
+                    <option value="constraint">Constraint (Security or privacy rule)</option>
+                    <option value="goal">Goal (Milestone or target)</option>
+                    <option value="preference">Preference (Workflow or style)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground block mb-1">
+                    Target Project (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    list="knot-shared-projects"
+                    value={newProjectHint}
+                    onChange={(e) => setNewProjectHint(e.target.value)}
+                    placeholder={
+                      selectedProject !== "all" && selectedProject !== "__personal__"
+                        ? selectedProject
+                        : knownProjects[0] || "e.g. Knot Core"
+                    }
+                    className="w-full h-10 px-3 rounded-lg bg-white dark:bg-zinc-900 border border-black/10 dark:border-white/10 text-xs"
+                  />
+                  <datalist id="knot-shared-projects">
+                    {projectOptions.map((proj) => (
+                      <option key={proj} value={proj} />
+                    ))}
+                  </datalist>
+                </div>
               </div>
 
               <div>
@@ -524,15 +1470,24 @@ const systemPrompt = \`You are an assistant. User verified rules:\\n\${invariant
 
               <button
                 type="submit"
-                disabled={!newStatement.trim()}
+                disabled={!newStatement.trim() || contributing}
                 className="px-5 py-2.5 rounded-lg bg-foreground text-background font-semibold text-xs hover:opacity-90 transition-all cursor-pointer disabled:opacity-50"
               >
-                Save to Shared Brain
+                {contributing
+                  ? "Saving to Knot..."
+                  : session
+                  ? "Save to Live Knot Account"
+                  : "Save to Shared Brain"}
               </button>
 
               {contributeStatus && (
                 <p className="text-xs font-medium text-emerald-600 dark:text-emerald-400">
                   {contributeStatus}
+                </p>
+              )}
+              {contributeError && (
+                <p className="text-xs font-medium text-red-600 dark:text-red-400">
+                  {contributeError}
                 </p>
               )}
             </form>
@@ -544,9 +1499,9 @@ const systemPrompt = \`You are an assistant. User verified rules:\\n\${invariant
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <div>
-                <h2 className="text-base font-semibold">12-Line Integration Code</h2>
+                <h2 className="text-base font-semibold">OAuth 2.1 + Live MCP Search Integration</h2>
                 <p className="text-xs text-muted-foreground">
-                  Paste this directly into your application backend to query user invariants on Turn 0.
+                  Drop-in OAuth 2.1 PKCE login and Turn-0 context retrieval with @knot-ai/sdk.
                 </p>
               </div>
               <button
@@ -556,7 +1511,7 @@ const systemPrompt = \`You are an assistant. User verified rules:\\n\${invariant
                   setCopied(true);
                   setTimeout(() => setCopied(false), 2000);
                 }}
-                className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md border border-black/15 text-xs font-medium hover:bg-black/5"
+                className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md border border-black/15 text-xs font-medium hover:bg-black/5 cursor-pointer"
               >
                 {copied ? <Check size={12} className="text-emerald-500" /> : <Copy size={12} />}
                 <span>{copied ? "Copied" : "Copy snippet"}</span>
@@ -571,4 +1526,8 @@ const systemPrompt = \`You are an assistant. User verified rules:\\n\${invariant
       </main>
     </div>
   );
+}
+
+function DEFAULT_INVARTS_FALLBACK(): ContextItem[] {
+  return DEFAULT_INVARIANTS;
 }
