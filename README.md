@@ -2,6 +2,7 @@
 
 A modern developer showcase application built with **Next.js 15 (App Router)**, **TypeScript**, and **Tailwind CSS**, demonstrating how to integrate **Knot** into any AI product using [`@knot-ai/sdk`](https://www.npmjs.com/package/@knot-ai/sdk).
 
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-demo--knot--context--search.pages.dev-emerald?logo=cloudflare&logoColor=white)](https://demo-knot-context-search.pages.dev)
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FKnot-Repo%2Fdemo-knot-context-search)
 [![Deploy to Cloudflare Pages](https://img.shields.io/badge/Deploy%20to-Cloudflare%20Pages-F38020?logo=cloudflare&logoColor=white)](https://dash.cloudflare.com/)
 [![Deploy to Firebase](https://img.shields.io/badge/Deploy%20to-Firebase%20Hosting-FFCA28?logo=firebase&logoColor=black)](https://firebase.google.com/)
