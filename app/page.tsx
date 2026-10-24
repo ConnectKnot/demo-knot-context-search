@@ -74,13 +74,13 @@ interface KnotOAuthSession {
 interface ChatResult {
   prompt?: string;
   systemPrompt: string;
-  retrievedInvariants: ContextItem[];
+  retrievedMemories: ContextItem[];
   answer: string;
 }
 
-const DEFAULT_INVARIANTS: ContextItem[] = [
+const DEFAULT_MEMORIES: ContextItem[] = [
   {
-    id: "inv-1",
+    id: "mem-1",
     kind: "decision",
     statement: "Frontend uses React 19, Next.js 15 App Router, and Tailwind CSS v4.",
     confidence: "high",
@@ -88,7 +88,7 @@ const DEFAULT_INVARIANTS: ContextItem[] = [
     sourceClientName: "Claude",
   },
   {
-    id: "inv-2",
+    id: "mem-2",
     kind: "fact",
     statement: "Primary database is PostgreSQL 16 on Neon with AES-256-GCM envelope encryption.",
     confidence: "high",
@@ -96,7 +96,7 @@ const DEFAULT_INVARIANTS: ContextItem[] = [
     sourceClientName: "Cursor",
   },
   {
-    id: "inv-3",
+    id: "mem-3",
     kind: "constraint",
     statement: "Never persist raw chat transcripts or provider-private prompts to shared memory.",
     confidence: "high",
@@ -104,7 +104,7 @@ const DEFAULT_INVARIANTS: ContextItem[] = [
     sourceClientName: "ChatGPT",
   },
   {
-    id: "inv-4",
+    id: "mem-4",
     kind: "goal",
     statement: "Maintain sub-50ms context retrieval latency across all MCP tool endpoints.",
     confidence: "high",
@@ -112,7 +112,7 @@ const DEFAULT_INVARIANTS: ContextItem[] = [
     sourceClientName: "Antigravity",
   },
   {
-    id: "inv-5",
+    id: "mem-5",
     kind: "preference",
     statement: "Lead UI copy with 'Shared Brain' instead of generic AI memory middleware terminology.",
     confidence: "high",
@@ -147,6 +147,21 @@ async function generateBrowserPkce(): Promise<{ verifier: string; challenge: str
   return { verifier, challenge, state };
 }
 
+function computeMatchTier(item: ContextItem, query: string): "Direct Match" | "Related Context" | null {
+  const q = query.trim().toLowerCase();
+  if (!q) return null;
+  const terms = q
+    .split(/\s+/)
+    .map((t) => t.replace(/[^a-z0-9]/gi, ""))
+    .filter((t) => t.length >= 3 && !["what", "who", "how", "are", "the", "for", "and", "with", "our", "from"].includes(t));
+
+  const haystack = `${item.statement} ${item.rationale || ""} ${item.entityName || ""}`.toLowerCase();
+  if (haystack.includes(q) || (terms.length > 0 && terms.some((t) => haystack.includes(t)))) {
+    return "Direct Match";
+  }
+  return "Related Context";
+}
+
 const OAUTH_PENDING_KEY = "knot_recall_oauth_pending_v1";
 const SESSION_KEY_PREFIX = "knot_recall_session_v1_";
 
@@ -159,8 +174,8 @@ export default function Home() {
 
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTab] = useState<"search" | "chat" | "add" | "code">("search");
-  const [items, setItems] = useState<ContextItem[]>(DEFAULT_INVARTS_FALLBACK());
-  const [allInvariants, setAllInvariants] = useState<ContextItem[]>(DEFAULT_INVARTS_FALLBACK());
+  const [items, setItems] = useState<ContextItem[]>(DEFAULT_MEMORIES);
+  const [allMemories, setAllMemories] = useState<ContextItem[]>(DEFAULT_MEMORIES);
   const [activeStates, setActiveStates] = useState<ActiveThreadState[]>([]);
   const [knownProjects, setKnownProjects] = useState<string[]>([]);
   const [selectedProject, setSelectedProject] = useState<string>("all");
@@ -168,11 +183,11 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
 
   // Chat simulator state
-  const [chatPrompt, setChatPrompt] = useState("What is our database stack and encryption policy?");
+  const [chatPrompt, setChatPrompt] = useState("What is our pricing model and database stack?");
   const [chatResult, setChatResult] = useState<ChatResult | null>(null);
   const [chatLoading, setChatLoading] = useState(false);
 
-  // New invariant contribution state
+  // New memory contribution state
   const [newStatement, setNewStatement] = useState("");
   const [newKind, setNewKind] = useState("decision");
   const [newProjectHint, setNewProjectHint] = useState("");
@@ -284,8 +299,8 @@ export default function Home() {
           setSession(null);
           setPermissions(null);
           setAuthError("Your Knot connection expired or was revoked. Reconnect your Knot account.");
-          setAllInvariants(DEFAULT_INVARIANTS);
-          setItems(DEFAULT_INVARIANTS);
+          setAllMemories(DEFAULT_MEMORIES);
+          setItems(DEFAULT_MEMORIES);
           return;
         }
 
@@ -298,9 +313,10 @@ export default function Home() {
 
         if (relevantRes.status === "fulfilled" && Array.isArray(relevantRes.value?.items)) {
           for (const raw of relevantRes.value.items) {
-            const pName = typeof raw.entityName === "string" && raw.entityName.trim()
-              ? raw.entityName.trim()
-              : undefined;
+            const pName =
+              typeof raw.entityName === "string" && raw.entityName.trim()
+                ? raw.entityName.trim()
+                : undefined;
             if (pName) discoveredProjects.add(pName);
 
             mergedItems.push({
@@ -333,11 +349,11 @@ export default function Home() {
               title,
               statement,
               confidence: "high",
-              entityName: "Personal Memories",
+              entityName: "Saved Memories",
               sourceClientName:
                 typeof raw.provenance?.client_name === "string"
                   ? raw.provenance.client_name
-                  : "Knot Vault",
+                  : "Your Knot",
             });
           }
         }
@@ -357,11 +373,11 @@ export default function Home() {
           return Array.from(combined);
         });
 
-        setAllInvariants(mergedItems);
+        setAllMemories(mergedItems);
         setItems(mergedItems);
       } catch (err) {
         setAuthError(
-          err instanceof Error ? err.message : "Could not load context from your Knot account."
+          err instanceof Error ? err.message : "Could not load memories from your Knot account."
         );
       } finally {
         setLoading(false);
@@ -413,8 +429,6 @@ export default function Home() {
       );
 
       // 3. Redirect user to Knot's real OAuth 2.1 consent page (/authorize)
-      // where they log in, choose specific projects ("Only selected projects" or "All my projects"),
-      // toggle permissions, and select individual memories.
       const authorizeUrl = new URL(`${originUrl}/api/oauth/authorize`);
       authorizeUrl.searchParams.set("client_id", regData.client_id);
       authorizeUrl.searchParams.set("redirect_uri", redirectUri);
@@ -449,8 +463,8 @@ export default function Home() {
     setKnownProjects([]);
     setActiveStates([]);
     setSelectedProject("all");
-    setAllInvariants(DEFAULT_INVARIANTS);
-    setItems(DEFAULT_INVARIANTS);
+    setAllMemories(DEFAULT_MEMORIES);
+    setItems(DEFAULT_MEMORIES);
     setChatResult(null);
 
     try {
@@ -487,7 +501,6 @@ export default function Home() {
       const rawPending = window.localStorage.getItem(OAUTH_PENDING_KEY);
       window.localStorage.removeItem(OAUTH_PENDING_KEY);
 
-      // Clean URL query params
       const cleanUrl = new URL(window.location.href);
       cleanUrl.searchParams.delete("code");
       cleanUrl.searchParams.delete("state");
@@ -588,7 +601,6 @@ export default function Home() {
   // Load saved session when switching between Production and Staging
   useEffect(() => {
     if (typeof window === "undefined") return;
-    // Skip if currently exchanging OAuth code
     if (new URLSearchParams(window.location.search).has("code")) return;
 
     const savedRaw = window.localStorage.getItem(`${SESSION_KEY_PREFIX}${env}`);
@@ -614,15 +626,15 @@ export default function Home() {
     setKnownProjects([]);
     setActiveStates([]);
     setSelectedProject("all");
-    setAllInvariants(DEFAULT_INVARIANTS);
-    setItems(DEFAULT_INVARIANTS);
+    setAllMemories(DEFAULT_MEMORIES);
+    setItems(DEFAULT_MEMORIES);
   }, [env]);
 
   // Debounced live search when connected, or client-side filter when in demo preview
   useEffect(() => {
     if (!session) {
       const q = searchQuery.trim().toLowerCase();
-      const matches = allInvariants.filter((item) => {
+      const matches = allMemories.filter((item) => {
         if (
           selectedProject !== "all" &&
           selectedProject !== "__personal__" &&
@@ -700,37 +712,57 @@ export default function Home() {
         }
       }
 
-      if (matched.length === 0) {
-        matched = (items.length > 0 ? items : allInvariants).slice(0, 4);
+      if (matched.length === 0 && !session) {
+        matched = (items.length > 0 ? items : allMemories).slice(0, 4);
       }
 
       const injectedLines =
         matched.length > 0
           ? matched
               .map(
-                (inv) =>
-                  `• [${inv.kind.toUpperCase()}${inv.entityName ? ` · ${inv.entityName}` : ""}] ${inv.statement}`
+                (mem) =>
+                  `• [${mem.kind.toUpperCase()}${mem.entityName ? ` · ${mem.entityName}` : ""}] ${mem.statement}`
               )
               .join("\n")
-          : "• (No matching invariants shared for this query yet)";
+          : "• (No matching project memories found for this prompt)";
 
-      const injectedPrompt = `You are an AI assistant. You have ambient access to the user's verified project invariants from their Knot Shared Brain:
+      const injectedPrompt = `You are an AI assistant connected to the user's Shared Brain via Knot.
+Relevant project memories and decisions retrieved on Turn 0:
 ${injectedLines}
 
-Answer the user's query while strictly honoring these decisions and constraints.`;
+Answer the user's prompt using these shared memories without asking them to repeat their context.`;
 
-      const summaryBullets =
-        matched.length > 0
-          ? matched.map((inv) => `- ${inv.statement}`).join("\n")
-          : "- Connect your Knot account or share project decisions to ground Turn-0 responses.";
+      const directMatches = matched.filter(
+        (m) => computeMatchTier(m, chatPrompt) === "Direct Match"
+      );
 
-      const groundedAnswer = session
-        ? `Grounded in ${matched.length} live item${matched.length === 1 ? "" : "s"} from your connected Knot account:\n${summaryBullets}\n\nYour prompt "${chatPrompt}" was answered using your real shared Knot context on Turn 0 without re-explaining your stack.`
-        : `Based on the sample preview invariants:\n${summaryBullets}\n\nConnect your Knot account above to run this Turn-0 simulation against your own projects and permissions.`;
+      let groundedAnswer = "";
+      if (session) {
+        if (matched.length === 0) {
+          groundedAnswer = `Knot searched your shared projects${
+            selectedProject !== "all" && selectedProject !== "__personal__"
+              ? ` (filtered to "${selectedProject}")`
+              : ""
+          } and found 0 saved memories matching "${chatPrompt}".\n\nSave a memory in the "Save Memory" tab or switch your project filter to "All Shared Projects" to broaden retrieval.`;
+        } else if (directMatches.length === 0) {
+          const summaryBullets = matched.map((mem) => `- ${mem.statement}`).join("\n");
+          groundedAnswer = `Note: No exact keyword match for "${chatPrompt}" was found in ${
+            selectedProject !== "all" && selectedProject !== "__personal__"
+              ? `"${selectedProject}"`
+              : "your shared projects"
+          }, so Knot surfaced the ${matched.length} closest project memories for background context:\n\n${summaryBullets}\n\n(In production, your app passes the injected system prompt on the left to your LLM so it knows your project context on Turn 0.)`;
+        } else {
+          const summaryBullets = matched.map((mem) => `- ${mem.statement}`).join("\n");
+          groundedAnswer = `Knot retrieved ${matched.length} relevant project memories (${directMatches.length} direct match${directMatches.length === 1 ? "" : "es"}) from your Shared Brain:\n\n${summaryBullets}\n\n(In production, your app passes the injected system prompt on the left to your LLM so it answers "${chatPrompt}" on Turn 0 without you re-explaining your work.)`;
+        }
+      } else {
+        const summaryBullets = matched.map((mem) => `- ${mem.statement}`).join("\n");
+        groundedAnswer = `Preview of memories injected into your AI's system prompt on Turn 0:\n\n${summaryBullets}\n\nConnect your Knot account above to test Turn-0 retrieval against your own projects and saved memories.`;
+      }
 
       setChatResult({
         systemPrompt: injectedPrompt,
-        retrievedInvariants: matched,
+        retrievedMemories: matched,
         answer: groundedAnswer,
       });
     } catch (err) {
@@ -742,7 +774,7 @@ Answer the user's query while strictly honoring these decisions and constraints.
     }
   };
 
-  // Add invariant contribution (real writeback to Knot when connected!)
+  // Save a new memory back to Knot
   const handleContribute = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newStatement.trim() || contributing) return;
@@ -768,24 +800,24 @@ Answer the user's query while strictly honoring these decisions and constraints.
 
         const statusLabel =
           res?.status === "accepted"
-            ? `Saved directly to your Knot project (${res?.entityName || targetProject || "Shared Brain"})!`
-            : "Submitted to your Knot approval queue! Review it in Your Knot.";
+            ? `Saved directly to your Shared Brain (${res?.entityName || targetProject || "Project Memory"})!`
+            : "Suggested to your Knot review queue! Approve it anytime in Your Knot.";
 
         setContributeStatus(statusLabel);
         setNewStatement("");
         await syncLiveKnotContext(session, originUrl, searchQuery, selectedProject);
       } else {
         const newItem: ContextItem = {
-          id: `inv-${Date.now()}`,
+          id: `mem-${Date.now()}`,
           kind: newKind as ContextItem["kind"],
           statement: newStatement.trim(),
           confidence: "high",
           entityName: newProjectHint.trim() || "Sandbox Preview",
           sourceClientName: "Knot Recall Demo",
         };
-        setAllInvariants((prev) => [newItem, ...prev]);
+        setAllMemories((prev) => [newItem, ...prev]);
         setContributeStatus(
-          "Saved to local preview! Connect your Knot account above to write directly to your real Shared Brain."
+          "Saved to local preview! Connect your Knot account above to save directly to your real Shared Brain."
         );
         setNewStatement("");
       }
@@ -793,7 +825,7 @@ Answer the user's query while strictly honoring these decisions and constraints.
       setContributeError(
         err instanceof Error
           ? err.message
-          : "Could not save item to Knot. Make sure you granted project write or propose permissions during login."
+          : "Could not save memory to Knot. Make sure you enabled project write or memory suggestions when connecting."
       );
     } finally {
       setContributing(false);
@@ -803,13 +835,13 @@ Answer the user's query while strictly honoring these decisions and constraints.
 
   const projectOptions = useMemo(() => {
     const set = new Set<string>(knownProjects);
-    for (const item of allInvariants) {
-      if (item.entityName && item.entityName !== "Personal Memories") {
+    for (const item of allMemories) {
+      if (item.entityName && item.entityName !== "Saved Memories") {
         set.add(item.entityName);
       }
     }
     return Array.from(set);
-  }, [knownProjects, allInvariants]);
+  }, [knownProjects, allMemories]);
 
   const filteredItems = items.filter((item) => {
     if (selectedProject === "__personal__" && item.kind !== "personal") return false;
@@ -826,13 +858,13 @@ Answer the user's query while strictly honoring these decisions and constraints.
 
   const integrationCodeSnippet = `import { ContinueWithKnot } from '@knot-ai/sdk/react';
 
-// 1. Render real OAuth 2.1 PKCE login so users pick which Knot projects & permissions to share
+// 1. Let users connect their Shared Brain and choose which projects & permissions to share
 <ContinueWithKnot
   mode="oauth"
   appName="Knot Recall Demo"
   knotUrl="${originUrl}"
   onSuccess={async ({ accessToken }) => {
-    // 2. Search the user's approved project invariants & memories on Turn 0
+    // 2. Retrieve relevant project memories & decisions on Turn 0
     const res = await fetch('${originUrl}/api/mcp', {
       method: 'POST',
       headers: {
@@ -847,7 +879,7 @@ Answer the user's query while strictly honoring these decisions and constraints.
       }),
     });
     const { result } = await res.json();
-    console.log('Shared project invariants:', result.structuredContent.items);
+    console.log('Shared project memories:', result.structuredContent.items);
   }}
 />`;
 
@@ -875,7 +907,7 @@ Answer the user's query while strictly honoring these decisions and constraints.
                   session ? "bg-emerald-500 animate-pulse" : "bg-zinc-400"
                 }`}
               />
-              {session ? "Live Knot Account Connected" : "Sandbox Preview"}
+              {session ? "Shared Brain Connected" : "Sandbox Preview"}
             </span>
           </div>
 
@@ -978,10 +1010,10 @@ Answer the user's query while strictly honoring these decisions and constraints.
               <span>One Shared Brain for All Your AIs</span>
             </div>
             <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">
-              Search your real Knot project invariants on Turn 0.
+              Don&apos;t start from scratch. Search your shared memories on Turn 0.
             </h1>
             <p className="text-sm text-foreground/65 leading-relaxed">
-              Log in with your Knot account, pick which projects and permissions to share on Knot&apos;s consent screen, and search your live decisions, facts, and personal memories across ChatGPT, Claude, and Cursor.
+              Connect your Knot account, choose which projects and permissions to share, and search your project decisions, notes, and saved memories across ChatGPT, Claude, and Cursor.
             </p>
           </div>
 
@@ -1009,7 +1041,7 @@ Answer the user's query while strictly honoring these decisions and constraints.
                 <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
                   <span className="inline-flex items-center gap-1">
                     <Lock size={11} />
-                    OAuth 2.1 PKCE · Choose projects &amp; scopes on{" "}
+                    OAuth 2.1 PKCE · Choose projects &amp; permissions on{" "}
                     <strong className="text-foreground/80">
                       {env === "staging" ? "staging.connectknot.com" : "connectknot.com"}
                     </strong>
@@ -1045,7 +1077,7 @@ Answer the user's query while strictly honoring these decisions and constraints.
                     </span>
                   </div>
                   <span className="text-[11px] font-mono text-muted-foreground">
-                    {allInvariants.length} shared items
+                    {allMemories.length} shared memories
                   </span>
                 </div>
 
@@ -1058,7 +1090,7 @@ Answer the user's query while strictly honoring these decisions and constraints.
                         : "bg-black/5 border-black/10 text-muted-foreground"
                     }`}
                   >
-                    Project Read: {permissions?.projectContextRead !== false ? "Granted" : "Off"}
+                    Read Shared Brain: {permissions?.projectContextRead !== false ? "On" : "Off"}
                   </span>
                   <span
                     className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
@@ -1067,11 +1099,11 @@ Answer the user's query while strictly honoring these decisions and constraints.
                         : "bg-black/5 border-black/10 text-muted-foreground"
                     }`}
                   >
-                    Project Write: {permissions?.projectContextContribute ? "Granted" : "Read-only"}
+                    Save Updates: {permissions?.projectContextContribute ? "On" : "Read-only"}
                   </span>
                   {typeof permissions?.selectedContextCount === "number" && (
                     <span className="text-[10px] font-mono px-2 py-0.5 rounded-full border bg-black/5 dark:bg-white/5 border-black/10 dark:border-white/10 text-foreground/80">
-                      {permissions.selectedContextCount} Personal Memories
+                      {permissions.selectedContextCount} Individual Memories
                     </span>
                   )}
                 </div>
@@ -1117,8 +1149,8 @@ Answer the user's query while strictly honoring these decisions and constraints.
             <div className="flex items-center gap-2 text-foreground/80">
               <Sparkles size={14} className="text-amber-600 dark:text-amber-400 shrink-0" />
               <span>
-                Showing <strong>5 sample invariants</strong> in preview mode. Click{" "}
-                <strong>Continue with Knot</strong> above to log into your Knot account, choose which projects and permissions to share, and search your real context.
+                Showing <strong>5 sample memories</strong> in preview mode. Click{" "}
+                <strong>Continue with Knot</strong> above to log into your Knot account, choose which projects and permissions to share, and search your real shared brain.
               </span>
             </div>
             <button
@@ -1146,7 +1178,7 @@ Answer the user's query while strictly honoring these decisions and constraints.
                 : "bg-white dark:bg-zinc-900 border border-black/10 dark:border-white/10 text-muted-foreground hover:text-foreground"
             }`}
           >
-            All Shared Projects ({allInvariants.length})
+            All Shared Projects ({allMemories.length})
           </button>
           {projectOptions.map((proj) => (
             <button
@@ -1172,7 +1204,7 @@ Answer the user's query while strictly honoring these decisions and constraints.
                   : "bg-white dark:bg-zinc-900 border border-black/10 dark:border-white/10 text-muted-foreground hover:text-foreground"
               }`}
             >
-              Personal Memories
+              Saved Memories
             </button>
           )}
         </div>
@@ -1180,9 +1212,9 @@ Answer the user's query while strictly honoring these decisions and constraints.
         {/* Tab Navigation */}
         <div className="flex border-b border-black/10 dark:border-white/10 gap-2 overflow-x-auto">
           {[
-            { id: "search", label: "Context Search", icon: Search },
-            { id: "chat", label: "Turn-0 AI Prompt Simulator", icon: Bot },
-            { id: "add", label: "Add Decision (Writeback)", icon: PlusCircle },
+            { id: "search", label: "Search Memories", icon: Search },
+            { id: "chat", label: "Turn-0 Prompt Inspector", icon: Bot },
+            { id: "add", label: "Save Memory (Writeback)", icon: PlusCircle },
             { id: "code", label: "Integration Code", icon: Code2 },
           ].map((tab) => {
             const Icon = tab.icon;
@@ -1205,7 +1237,7 @@ Answer the user's query while strictly honoring these decisions and constraints.
           })}
         </div>
 
-        {/* TAB 1: CONTEXT SEARCH */}
+        {/* TAB 1: SEARCH MEMORIES */}
         {activeTab === "search" && (
           <div className="space-y-4">
             <div className="flex flex-col sm:flex-row gap-3">
@@ -1215,8 +1247,8 @@ Answer the user's query while strictly honoring these decisions and constraints.
                   type="text"
                   placeholder={
                     session
-                      ? "Search your live Knot project decisions, architecture facts, constraints, or memories..."
-                      : "Search decisions, database stack, encryption constraints, or goals..."
+                      ? "Search your shared project decisions, notes, goals, or saved memories..."
+                      : "Search project decisions, tech stack notes, rules, or goals..."
                   }
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
@@ -1246,7 +1278,7 @@ Answer the user's query while strictly honoring these decisions and constraints.
                         : "bg-black/5 dark:bg-white/5 text-muted-foreground hover:text-foreground"
                     }`}
                   >
-                    {k.replace("_", " ")}
+                    {k === "personal" ? "saved memory" : k.replace("_", " ")}
                   </button>
                 ))}
               </div>
@@ -1255,53 +1287,67 @@ Answer the user's query while strictly honoring these decisions and constraints.
             {loading && (
               <div className="text-xs font-mono text-muted-foreground flex items-center gap-2 py-2">
                 <RefreshCw size={12} className="animate-spin" />
-                <span>Querying encrypted project invariants from Knot...</span>
+                <span>Searching your Shared Brain...</span>
               </div>
             )}
 
             {/* Results Grid */}
             <div className="grid gap-3 sm:grid-cols-2">
-              {filteredItems.map((item) => (
-                <div
-                  key={item.id}
-                  className="rounded-xl border border-black/10 dark:border-white/10 bg-white dark:bg-zinc-900/60 p-4 space-y-2.5 hover:border-black/25 dark:hover:border-white/25 transition-all flex flex-col justify-between"
-                >
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between gap-2 flex-wrap">
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="text-[10px] font-mono font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-black/5 dark:bg-white/10">
-                          {item.kind.replace("_", " ")}
-                        </span>
-                        {item.entityName && (
-                          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/20">
-                            {item.entityName}
+              {filteredItems.map((item) => {
+                const matchTier = computeMatchTier(item, searchQuery);
+                return (
+                  <div
+                    key={item.id}
+                    className="rounded-xl border border-black/10 dark:border-white/10 bg-white dark:bg-zinc-900/60 p-4 space-y-2.5 hover:border-black/25 dark:hover:border-white/25 transition-all flex flex-col justify-between"
+                  >
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-[10px] font-mono font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-black/5 dark:bg-white/10">
+                            {item.kind === "personal"
+                              ? "saved memory"
+                              : item.kind.replace("_", " ")}
                           </span>
-                        )}
+                          {item.entityName && (
+                            <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/20">
+                              {item.entityName}
+                            </span>
+                          )}
+                          {matchTier && (
+                            <span
+                              className={`text-[10px] font-mono px-2 py-0.5 rounded border ${
+                                matchTier === "Direct Match"
+                                  ? "bg-blue-500/10 text-blue-700 dark:text-blue-300 border-blue-500/25 font-semibold"
+                                  : "bg-black/5 dark:bg-white/5 text-muted-foreground border-black/10 dark:border-white/10"
+                              }`}
+                            >
+                              {matchTier}
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-[11px] font-mono text-muted-foreground">
+                          {item.sourceClientName ? `from ${item.sourceClientName}` : "Shared Brain"}
+                        </span>
                       </div>
-                      <span className="text-[11px] font-mono text-muted-foreground">
-                        {item.sourceClientName
-                          ? `via ${item.sourceClientName}`
-                          : `${item.confidence || "high"} confidence`}
-                      </span>
+                      <p className="text-sm font-medium leading-relaxed">{item.statement}</p>
+                      {item.rationale && (
+                        <p className="text-xs text-muted-foreground leading-relaxed border-l-2 border-black/15 dark:border-white/15 pl-2.5">
+                          {item.rationale}
+                        </p>
+                      )}
                     </div>
-                    <p className="text-sm font-medium leading-relaxed">{item.statement}</p>
-                    {item.rationale && (
-                      <p className="text-xs text-muted-foreground leading-relaxed border-l-2 border-black/15 dark:border-white/15 pl-2.5">
-                        {item.rationale}
-                      </p>
-                    )}
                   </div>
-                </div>
-              ))}
+                );
+              })}
 
               {filteredItems.length === 0 && !loading && (
                 <div className="col-span-2 text-center py-12 rounded-xl border border-dashed border-black/15 dark:border-white/15 space-y-2 px-4">
                   <p className="text-sm font-medium text-foreground">
-                    No matching context items found.
+                    No matching memories found.
                   </p>
                   <p className="text-xs text-muted-foreground max-w-md mx-auto">
                     {session
-                      ? "Try clearing your search query or click 'Change Shared Projects & Permissions' above to grant access to additional projects in your Knot account."
+                      ? "Try clearing your search query, switching the project filter above to 'All Shared Projects', or clicking 'Change Shared Projects & Permissions' to share additional projects."
                       : "Try a different keyword or connect your Knot account to search your real projects."}
                   </p>
                 </div>
@@ -1312,7 +1358,7 @@ Answer the user's query while strictly honoring these decisions and constraints.
             {session && activeStates.length > 0 && (
               <div className="pt-4 space-y-2.5">
                 <h3 className="text-xs font-mono uppercase tracking-wider text-muted-foreground">
-                  Recent Active Threads Across Your Connected AIs ({activeStates.length})
+                  Recent Work Updates Across Your Connected AIs ({activeStates.length})
                 </h3>
                 <div className="grid gap-3 sm:grid-cols-2">
                   {activeStates.slice(0, 4).map((st) => (
@@ -1325,7 +1371,7 @@ Answer the user's query while strictly honoring these decisions and constraints.
                           {st.project_label || "General Workspace"}
                         </span>
                         {st.source && (
-                          <span className="text-muted-foreground">via {st.source}</span>
+                          <span className="text-muted-foreground">from {st.source}</span>
                         )}
                       </div>
                       <p className="text-xs font-medium text-foreground/90">{st.task_summary}</p>
@@ -1342,15 +1388,21 @@ Answer the user's query while strictly honoring these decisions and constraints.
           </div>
         )}
 
-        {/* TAB 2: TURN-0 AI PROMPT SIMULATOR */}
+        {/* TAB 2: TURN-0 PROMPT INSPECTOR */}
         {activeTab === "chat" && (
           <div className="space-y-6">
             <div className="space-y-1">
-              <h2 className="text-base font-semibold">Turn-0 System Prompt Simulator</h2>
+              <h2 className="text-base font-semibold">
+                Turn-0 Prompt Inspector (Zero-LLM Context Retrieval)
+              </h2>
               <p className="text-xs text-muted-foreground">
                 {session
-                  ? "Queries your live Knot account for relevant invariants and injects them into the Turn-0 system prompt."
-                  : "Observe how Knot context is automatically retrieved and injected into your model's system prompt."}
+                  ? `Queries your live Knot account${
+                      selectedProject !== "all" && selectedProject !== "__personal__"
+                        ? ` (currently filtered to project "${selectedProject}")`
+                        : ""
+                    } via get_relevant_context and shows the exact memories injected into your AI's system prompt before calling an LLM.`
+                  : "See how Knot retrieves relevant project memories and prepends them into your model's system prompt on Turn 0."}
               </p>
             </div>
 
@@ -1359,7 +1411,7 @@ Answer the user's query while strictly honoring these decisions and constraints.
                 type="text"
                 value={chatPrompt}
                 onChange={(e) => setChatPrompt(e.target.value)}
-                placeholder="Enter prompt for the AI (e.g. What database stack or architecture rules do we use?)"
+                placeholder="Enter a user prompt to test Turn-0 memory retrieval (e.g. What is our pricing model?)"
                 className="flex-1 h-11 px-4 rounded-xl bg-white dark:bg-zinc-900 border border-black/10 dark:border-white/10 text-sm focus:outline-none focus:ring-2 focus:ring-foreground"
               />
               <button
@@ -1368,7 +1420,7 @@ Answer the user's query while strictly honoring these decisions and constraints.
                 disabled={chatLoading || !chatPrompt.trim()}
                 className="px-5 h-11 rounded-xl bg-foreground text-background font-semibold text-xs inline-flex items-center gap-2 hover:opacity-90 transition-all cursor-pointer disabled:opacity-50"
               >
-                <span>{chatLoading ? "Querying Knot..." : "Simulate Turn 0"}</span>
+                <span>{chatLoading ? "Searching Knot..." : "Inspect Turn 0"}</span>
                 <ArrowRight size={14} />
               </button>
             </div>
@@ -1378,17 +1430,17 @@ Answer the user's query while strictly honoring these decisions and constraints.
                 {/* Injected System Prompt */}
                 <div className="rounded-xl border border-black/10 dark:border-white/10 bg-white dark:bg-zinc-900 p-4 space-y-2">
                   <span className="text-xs font-mono font-bold text-primary">
-                    1. Injected System Prompt ({chatResult.retrievedInvariants.length} items)
+                    1. System Prompt Injected by Knot ({chatResult.retrievedMemories.length} memories)
                   </span>
                   <pre className="text-xs font-mono bg-black/5 dark:bg-black/40 p-3 rounded-lg overflow-x-auto whitespace-pre-wrap leading-relaxed">
                     {chatResult.systemPrompt}
                   </pre>
                 </div>
 
-                {/* Model Completion */}
+                {/* Retrieval Breakdown */}
                 <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 dark:bg-zinc-900 p-4 space-y-2">
                   <span className="text-xs font-mono font-bold text-emerald-600 dark:text-emerald-400">
-                    2. AI Response (Zero Cold-Start)
+                    2. Retrieved Memory Context (No LLM Call Required)
                   </span>
                   <div className="text-xs sm:text-sm leading-relaxed whitespace-pre-wrap bg-white dark:bg-black/40 p-3 rounded-lg border border-black/5">
                     {chatResult.answer}
@@ -1399,15 +1451,15 @@ Answer the user's query while strictly honoring these decisions and constraints.
           </div>
         )}
 
-        {/* TAB 3: ADD DECISION */}
+        {/* TAB 3: SAVE MEMORY */}
         {activeTab === "add" && (
           <div className="max-w-xl space-y-4">
             <div className="space-y-1">
-              <h2 className="text-base font-semibold">Contribute a New Invariant</h2>
+              <h2 className="text-base font-semibold">Save a New Memory to Your Shared Brain</h2>
               <p className="text-xs text-muted-foreground">
                 {session
-                  ? "Save a decision or fact directly back to your connected Knot account. Connected tools (Cursor, Claude, ChatGPT) immediately stay in sync."
-                  : "Save an architectural decision back to Knot. Connect your Knot account above to write directly to your live Shared Brain."}
+                  ? "Save a project decision, note, or preference back to your Knot account so Claude, ChatGPT, and Cursor stay in sync."
+                  : "Save a project decision or note back to Knot. Connect your Knot account above to save directly to your live Shared Brain."}
               </p>
             </div>
 
@@ -1415,24 +1467,24 @@ Answer the user's query while strictly honoring these decisions and constraints.
               <div className="grid sm:grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs font-medium text-muted-foreground block mb-1">
-                    Invariant Kind
+                    Memory Type
                   </label>
                   <select
                     value={newKind}
                     onChange={(e) => setNewKind(e.target.value)}
                     className="w-full h-10 px-3 rounded-lg bg-white dark:bg-zinc-900 border border-black/10 dark:border-white/10 text-xs font-medium"
                   >
-                    <option value="decision">Decision (Architectural choice)</option>
-                    <option value="fact">Fact (Technical stack, API version)</option>
-                    <option value="constraint">Constraint (Security or privacy rule)</option>
-                    <option value="goal">Goal (Milestone or target)</option>
+                    <option value="decision">Decision (Project or architecture choice)</option>
+                    <option value="fact">Fact (Tech stack, API, or reference note)</option>
+                    <option value="constraint">Constraint (Rule or boundary to follow)</option>
+                    <option value="goal">Goal (Milestone or priority)</option>
                     <option value="preference">Preference (Workflow or style)</option>
                   </select>
                 </div>
 
                 <div>
                   <label className="text-xs font-medium text-muted-foreground block mb-1">
-                    Target Project (Optional)
+                    Project Name (Optional)
                   </label>
                   <input
                     type="text"
@@ -1456,7 +1508,7 @@ Answer the user's query while strictly honoring these decisions and constraints.
 
               <div>
                 <label className="text-xs font-medium text-muted-foreground block mb-1">
-                  Statement
+                  Memory or Decision
                 </label>
                 <textarea
                   rows={3}
@@ -1476,8 +1528,8 @@ Answer the user's query while strictly honoring these decisions and constraints.
                 {contributing
                   ? "Saving to Knot..."
                   : session
-                  ? "Save to Live Knot Account"
-                  : "Save to Shared Brain"}
+                  ? "Save to Shared Brain"
+                  : "Save to Preview"}
               </button>
 
               {contributeStatus && (
@@ -1499,9 +1551,9 @@ Answer the user's query while strictly honoring these decisions and constraints.
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <div>
-                <h2 className="text-base font-semibold">OAuth 2.1 + Live MCP Search Integration</h2>
+                <h2 className="text-base font-semibold">OAuth 2.1 + Shared Brain Search Integration</h2>
                 <p className="text-xs text-muted-foreground">
-                  Drop-in OAuth 2.1 PKCE login and Turn-0 context retrieval with @knot-ai/sdk.
+                  Drop-in OAuth 2.1 PKCE login and Turn-0 memory retrieval with @knot-ai/sdk.
                 </p>
               </div>
               <button
@@ -1526,8 +1578,4 @@ Answer the user's query while strictly honoring these decisions and constraints.
       </main>
     </div>
   );
-}
-
-function DEFAULT_INVARTS_FALLBACK(): ContextItem[] {
-  return DEFAULT_INVARIANTS;
 }
