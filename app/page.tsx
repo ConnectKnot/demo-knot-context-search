@@ -69,7 +69,7 @@ export default function Home() {
   const [connectionId, setConnectionId] = useState<string>("demo_conn_preview");
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTab] = useState<"search" | "chat" | "add" | "code">("search");
-  const [items, setItems] = useState<ContextItem[]>([]);
+  const [items, setItems] = useState<ContextItem[]>(DEFAULT_INVARIANTS);
   const [loading, setLoading] = useState(false);
   const [selectedKind, setSelectedKind] = useState<string>("all");
 
