@@ -3,7 +3,7 @@
 A modern developer showcase application built with **Next.js 15 (App Router)**, **TypeScript**, and **Tailwind CSS**, demonstrating how to integrate **Knot** into any AI product using [`@knot-ai/sdk`](https://www.npmjs.com/package/@knot-ai/sdk).
 
 [![Live Demo](https://img.shields.io/badge/Live%20Demo-demo--knot--context--search.pages.dev-emerald?logo=cloudflare&logoColor=white)](https://demo-knot-context-search.pages.dev)
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FKnot-Repo%2Fdemo-knot-context-search)
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FConnectKnot%2Fdemo-knot-context-search)
 [![Deploy to Cloudflare Pages](https://img.shields.io/badge/Deploy%20to-Cloudflare%20Pages-F38020?logo=cloudflare&logoColor=white)](https://dash.cloudflare.com/)
 [![Deploy to Firebase](https://img.shields.io/badge/Deploy%20to-Firebase%20Hosting-FFCA28?logo=firebase&logoColor=black)](https://firebase.google.com/)
 [![npm version](https://img.shields.io/npm/v/@knot-ai/sdk.svg?color=emerald)](https://www.npmjs.com/package/@knot-ai/sdk)
@@ -53,7 +53,7 @@ This demo demonstrates the complete developer integration lifecycle:
 
 ### 1. Clone the repository
 ```bash
-git clone https://github.com/Knot-Repo/demo-knot-context-search.git
+git clone https://github.com/ConnectKnot/demo-knot-context-search.git
 cd demo-knot-context-search
 ```
 
@@ -112,7 +112,7 @@ npx wrangler pages deploy out --project-name=demo-knot-context-search --branch=m
 
 #### Via Cloudflare Dashboard Git Integration:
 1. Log in to [Cloudflare Dashboard](https://dash.cloudflare.com/) and navigate to **Workers & Pages** > **Create application** > **Pages** > **Connect to Git**.
-2. Select `Knot-Repo/demo-knot-context-search`.
+2. Select `ConnectKnot/demo-knot-context-search`.
 3. Configure build settings:
    - **Framework preset**: `Next.js (Static HTML Export)`
    - **Build command**: `npm run build`
@@ -127,7 +127,7 @@ A turnkey GitHub Actions workflow is also included at [`.github/workflows/deploy
 
 Deploy with zero configuration using the Vercel Deploy button:
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FKnot-Repo%2Fdemo-knot-context-search)
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FConnectKnot%2Fdemo-knot-context-search)
 
 Or via the Vercel CLI:
 ```bash

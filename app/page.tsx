@@ -939,7 +939,7 @@ Answer the user's prompt using these shared memories without asking them to repe
             </div>
 
             <a
-              href="https://github.com/Knot-Repo/demo-knot-context-search"
+              href="https://github.com/ConnectKnot/demo-knot-context-search"
               target="_blank"
               rel="noopener noreferrer"
               className="text-xs font-semibold underline text-foreground/80 hover:text-foreground hidden sm:flex items-center gap-1"
